@@ -1,0 +1,9 @@
+node_modules
+.github
+.git
+.gitignore
+README.md
+LICENSE
+*.md
+webui/node_modules
+webui/.next

@@ -1,0 +1,60 @@
+services:
+  gamdl-downloader:
+    build: .
+    image: gamdl-downloader:latest
+    container_name: gamdl-downloader
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config:/config
+      - ${MUSIC_HOST_PATH:-./downloads}:/data/music
+    environment:
+      - FREQUENCY=3600
+      - OUTPUT_DIR=/data/music
+      - PLAYLIST_M3U_DIR=/data/music/playlists
+      - DOWNLOAD_MODE=nm3u8dlre
+      - AUTO_UPDATE=true
+      - AUTO_UPDATE_INTERVAL=86400
+      - AUTO_UPDATE_GAMDL=false
+      - TZ=America/New_York
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "entrypoint"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      - webui
+
+  webui:
+    build: ./webui
+    image: gamdl-webui:latest
+    container_name: gamdl-webui
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config:/config
+      - ${MUSIC_HOST_PATH:-./downloads}:/data/music
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - NODE_ENV=production
+      - DOWNLOAD_CONTAINER=gamdl-downloader
+      - TZ=America/New_York
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/settings').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  auto-updater:
+    image: containrrr/watchtower:latest
+    container_name: gamdl-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 21600 --cleanup gamdl-downloader gamdl-webui
+    profiles:
+      - updates

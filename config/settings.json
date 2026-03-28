@@ -1,0 +1,15 @@
+{
+  "frequency": 3600,
+  "outputLocation": "/data/music",
+  "playlistM3uDir": "/data/music/playlists",
+  "outputStructure": "{artist}/{album}/{title}",
+  "fileFormat": "m4a",
+  "downloadLyrics": true,
+  "lyricsFormat": "lrc",
+  "quality": "high",
+  "savePlaylist": true,
+  "overwrite": false,
+  "downloadMode": "nm3u8dlre",
+  "autoUpdate": true,
+  "autoUpdateInterval": 86400
+}
