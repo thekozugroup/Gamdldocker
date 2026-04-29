@@ -28,9 +28,9 @@ teardown() {
   rm -rf "$TEST_TMP"
 }
 
-@test "sanitize_filename strips unsafe chars \\ / : * ? \" < > |" {
+@test "sanitize_filename maps unsafe chars to Unicode lookalikes" {
   result="$(sanitize_filename 'a\b/c:d*e?f"g<h>i|j' 'fallback')"
-  [ "$result" = "abcdefghij" ]
+  [ "$result" = "a＼b／c：d＊e？f＂g＜h＞i｜j" ]
 }
 
 @test "sanitize_filename strips ASCII control chars" {
@@ -54,7 +54,9 @@ teardown() {
 }
 
 @test "sanitize_filename input that becomes empty after stripping returns fallback" {
-  result="$(sanitize_filename '////////' 'fb6chr')"
+  # Slashes now map to fullwidth lookalikes, so the bare-control-chars input
+  # is the one that collapses to empty.
+  result="$(sanitize_filename "$(printf '\x01\x02\x03')" 'fb6chr')"
   [ "$result" = "fb6chr" ]
 }
 
@@ -65,8 +67,63 @@ teardown() {
 
 @test "sanitize_filename preserves non-ASCII letters and symbols" {
   result="$(sanitize_filename '¯\_(ツ)_/¯' 'fb')"
-  # backslashes and slashes get stripped, but ツ and ¯ and underscores survive
-  [ "$result" = "¯_(ツ)_¯" ]
+  # backslash -> ＼ (U+FF3C), slash -> ／ (U+FF0F); ツ, ¯ and underscores survive.
+  [ "$result" = "¯＼_(ツ)_／¯" ]
+}
+
+@test "sanitize_filename preserves '+' (not in unsafe set)" {
+  # gamdl mangles '+' into space internally; our sanitizer must leave it alone.
+  result="$(sanitize_filename '🪨+roll' 'fb')"
+  [ "$result" = "🪨+roll" ]
+}
+
+@test "SAFE_FILENAMES=true preserves '+' but strips emoji" {
+  SAFE_FILENAMES=true result="$(sanitize_filename '🪨+roll' 'fb')"
+  [ "$result" = "+roll" ]
+}
+
+@test "SAFE_FILENAMES=true with shrug falls back to short-id (cosmetic stub rejected)" {
+  # The ASCII filter would leave only '_()_' (zero alphanumerics). The
+  # short-glyph fallback (<3 [A-Za-z0-9] chars) kicks in and the supplied
+  # fallback wins instead.
+  SAFE_FILENAMES=true result="$(sanitize_filename '¯\_(ツ)_/¯' 'short')"
+  [ "$result" = "short" ]
+}
+
+@test "resolve_playlist_name precedence: cache beats URL slug when no override" {
+  # Real-world scenario: cache has the correct API title with a '+' in it,
+  # the URL slug would mangle it to spaces. resolve_playlist_name must
+  # return the cache title verbatim, not a sanitized URL slug.
+  cat >"$NAME_CACHE_FILE" <<'EOF'
+{ "https://music.apple.com/us/playlist/rocknroll/pl.u-PLUSAAA111111": { "name": "🪨+roll" } }
+EOF
+  result="$(resolve_playlist_name 'https://music.apple.com/us/playlist/rocknroll/pl.u-PLUSAAA111111')"
+  [ "$result" = "🪨+roll" ]
+}
+
+@test "post-download flow: cache title beats gamdl mangled source basename" {
+  # Simulate the real bug: gamdl writes '🪨 roll.m3u' (its own sanitizer
+  # mangled '+' to space), but the cache holds '🪨+roll' from the API.
+  # The resolved target_name MUST come from the cache, not the source.
+  export PLAYLIST_M3U_DIR="$TEST_TMP/playlists"
+  mkdir -p "$PLAYLIST_M3U_DIR"
+  url='https://music.apple.com/us/playlist/rocknroll/pl.u-PLUSAAA111111'
+  cat >"$NAME_CACHE_FILE" <<EOF
+{ "$url": { "name": "🪨+roll" } }
+EOF
+  # Fake gamdl output (mangled name).
+  src="$TEST_TMP/🪨 roll.m3u"
+  printf '#EXTM3U\n' >"$src"
+
+  resolved_name="$(resolve_playlist_name "$url")"
+  # Mirror the post-download branch's selection logic:
+  url_slug_fallback="$(sanitize_filename "$(playlist_filename_from_url "$url")" "$(playlist_short_id "$url")")"
+  if [ "$resolved_name" = "$url_slug_fallback" ]; then
+    target_name="$(sanitize_filename "$(basename "${src%.*}")" "$(playlist_short_id "$url")")"
+  else
+    target_name="$resolved_name"
+  fi
+  [ "$target_name" = "🪨+roll" ]
 }
 
 @test "SAFE_FILENAMES=true strips non-ASCII and emoji" {
@@ -95,6 +152,19 @@ teardown() {
   declare -gA SEEN_LC=([jams]=1)
   result="$(uniquify_playlist_name 'Jams' 'https://music.apple.com/us/playlist/jams/pl.u-qxyl1KBu2ALAyAr')"
   [ "$result" = "Jams (ALAyAr)" ]
+}
+
+@test "playlist-overrides.json.example parses as valid JSON" {
+  # First-time UX guard: the example must always round-trip through the
+  # stdlib JSON parser so a copy-paste setup doesn't silently break.
+  run "$PYBIN" -c "import json; json.load(open('${BATS_TEST_DIRNAME}/../config/playlist-overrides.json.example'))"
+  [ "$status" -eq 0 ]
+}
+
+@test "SAFE_FILENAMES=true short-glyph fallback keeps real short names" {
+  # 'Mix' has 3 alphanumerics — at the threshold, must NOT trigger the fallback.
+  SAFE_FILENAMES=true result="$(sanitize_filename 'Mix' 'short')"
+  [ "$result" = "Mix" ]
 }
 
 @test "resolve_playlist_name uses override when override file present" {
@@ -140,7 +210,8 @@ EOF
 { "https://music.apple.com/us/playlist/foo/pl.u-AAAAAA111111": "Bad/Name:Here..." }
 EOF
   result="$(resolve_playlist_name 'https://music.apple.com/us/playlist/foo/pl.u-AAAAAA111111')"
-  [ "$result" = "BadNameHere" ]
+  # Slash -> ／ (U+FF0F), colon -> ： (U+FF1A), trailing dots stripped.
+  [ "$result" = "Bad／Name：Here" ]
 }
 
 @test "resolve_playlist_name preserves emoji in override" {

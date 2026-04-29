@@ -90,7 +90,7 @@ If no playlists are configured, downloader stays alive and retries every 60s.
 Playlist `.m3u8` files are written to `PLAYLIST_M3U_DIR` (default `/data/music/playlists`). Naming rules:
 
 1. **Source of truth.** The downloader uses Apple Music's stored playlist title, cached in `config/playlist-name-cache.json`. The web UI keeps this cache in sync as it resolves URLs against the Apple API.
-2. **Sanitization.** `\ / : * ? " < > |` and ASCII control characters are stripped from the title. Trailing dots/spaces are trimmed (Windows refuses them). Emoji and Unicode letters are preserved by default — `🪨 roll.m3u8`, `💍.m3u8`, and `¯\_(ツ)_/¯.m3u8` round-trip cleanly on ext4 / APFS / NTFS / Tailscale-served Syncthing peers.
+2. **Sanitization.** Filesystem-unsafe chars (`\ / : * ? " < > |`) are replaced with Unicode lookalikes (`＼ ／ ： ＊ ？ ＂ ＜ ＞ ｜`) so the rendered name matches Apple's stored title. ASCII control chars are still stripped. Trailing dots/spaces are trimmed (Windows refuses them). Emoji and Unicode letters are preserved — `🪨+roll.m3u8`, `💍.m3u8`, and `¯＼_(ツ)_／¯.m3u8` round-trip cleanly on ext4 / APFS / NTFS / Tailscale-served Syncthing peers.
 3. **Case-insensitive collision suffix.** If two playlists in the same cycle resolve to names that differ only in case (e.g. `Jams` and `jams`), the second one gets a `(<short-id>)` suffix (last 6 chars of the `pl.u-...` ID). This keeps both files visible on macOS HFS+/APFS, Windows NTFS, and exFAT.
 4. **Manual overrides.** When Apple's stored title is wrong (or you want a different display name), copy `config/playlist-overrides.json.example` to `config/playlist-overrides.json` and add entries:
 
@@ -101,7 +101,8 @@ Playlist `.m3u8` files are written to `PLAYLIST_M3U_DIR` (default `/data/music/p
    ```
 
    Overrides take precedence over the cached API name. Sanitization and collision suffixing still apply. The override file is gitignored; the example is tracked.
-5. **Cross-platform sync mode.** Set `SAFE_FILENAMES=true` in `.env` to additionally strip non-ASCII characters. Use this only when targeting legacy SMB or exFAT shares that mishandle UTF-8.
+5. **Precedence after a fresh download.** Overrides and the API-title cache take precedence over gamdl's filesystem-mangled m3u filename, so the title round-trips even when gamdl's internal sanitizer would have mangled `+`, `\`, `/`, etc. Edge case: if a freshly-added URL has neither an override nor a cache hit yet, the URL-slug last-resort defers to gamdl's source basename for that cycle (it usually resolves on the next pass once the WebUI populates the cache).
+6. **Cross-platform sync mode.** Set `SAFE_FILENAMES=true` in `.env` to additionally strip non-ASCII characters. Use this only when targeting legacy SMB or exFAT shares that mishandle UTF-8.
 
 Run the naming-helper tests locally:
 

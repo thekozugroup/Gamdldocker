@@ -172,9 +172,12 @@ else:
 PY
 }
 
-# sanitize_filename: strip cross-platform-unsafe chars, collapse whitespace,
-# trim, drop trailing dots. Preserves Unicode (emoji, CJK, etc.) by default.
-# When SAFE_FILENAMES=true (env), strip non-ASCII as well.
+# sanitize_filename: map cross-platform-unsafe printable chars to single-codepoint
+# Unicode lookalikes (visual fidelity), strip ASCII control chars, collapse
+# whitespace, trim, drop trailing dots. Preserves Unicode (emoji, CJK, etc.)
+# by default. When SAFE_FILENAMES=true (env), strip non-ASCII as well — this
+# also strips the lookalikes, restoring the legacy stripping behaviour for
+# that mode.
 # Args: $1 = raw name, $2 = fallback (used when sanitized result is empty).
 sanitize_filename() {
   SAFE_FILENAMES_ENV="$SAFE_FILENAMES" "$PYBIN" - "$1" "${2:-playlist}" <<'PY'
@@ -188,15 +191,44 @@ fallback = sys.argv[2] or 'playlist'
 safe_mode = os.environ.get('SAFE_FILENAMES_ENV', 'false').lower() == 'true'
 
 name = unicodedata.normalize('NFC', name)
-# Strip ASCII control chars (\x00-\x1f) and the unsafe set \ / : * ? " < > |
-name = re.sub(r'[\x00-\x1f\\/:*?"<>|]', '', name)
-# Optional ASCII-only mode for legacy SMB / exFAT
+# Strip ASCII control chars (\x00-\x1f) — never representable.
+name = re.sub(r'[\x00-\x1f]', '', name)
+# Map filesystem-unsafe printable chars to Unicode lookalikes so the
+# rendered filename still LOOKS like the original (e.g. ¯\_(ツ)_/¯).
+# All 9 glyphs use the FF-block fullwidth forms — symmetric and predictable
+# across Linux/Windows/macOS renderers. (We previously used U+A789 MODIFIER
+# LETTER COLON for ':' as a macOS Finder convention, but mixing codepoint
+# blocks made the map harder to reason about and the convention isn't
+# universal on Linux/Windows.)
+unsafe_map = {
+    '\\': '＼',  # FULLWIDTH REVERSE SOLIDUS  (U+FF3C)
+    '/':  '／',  # FULLWIDTH SOLIDUS          (U+FF0F)
+    ':':  '：',  # FULLWIDTH COLON            (U+FF1A)
+    '*':  '＊',  # FULLWIDTH ASTERISK         (U+FF0A)
+    '?':  '？',  # FULLWIDTH QUESTION MARK    (U+FF1F)
+    '"':  '＂',  # FULLWIDTH QUOTATION MARK   (U+FF02)
+    '<':  '＜',  # FULLWIDTH LESS-THAN SIGN   (U+FF1C)
+    '>':  '＞',  # FULLWIDTH GREATER-THAN SIGN(U+FF1E)
+    '|':  '｜',  # FULLWIDTH VERTICAL LINE    (U+FF5C)
+}
+name = ''.join(unsafe_map.get(c, c) for c in name)
+# Optional ASCII-only mode for legacy SMB / exFAT — also drops the
+# lookalikes since they live outside ASCII.
 if safe_mode:
     name = name.encode('ascii', 'ignore').decode('ascii')
 # Collapse whitespace runs
 name = re.sub(r'\s+', ' ', name).strip()
 # Trim trailing dots and spaces (Windows refuses them)
 name = re.sub(r'[.\s]+$', '', name)
+
+# SAFE_FILENAMES short-glyph fallback: when the ASCII filter has gutted the
+# input down to a cosmetic stub (e.g. '¯\_(ツ)_/¯' -> '_()_'), prefer the
+# caller's fallback (the playlist's short-id) over the stub. Threshold:
+# fewer than 3 [A-Za-z0-9] chars. Three keeps short real names like 'Mix'
+# but rejects punctuation-only stubs.
+SAFE_MIN_ALNUM = 3
+if safe_mode and len(re.findall(r'[A-Za-z0-9]', name)) < SAFE_MIN_ALNUM:
+    name = fallback
 
 if not name:
     name = fallback
@@ -364,26 +396,6 @@ name = unicodedata.normalize('NFC', name)
 # Replace filesystem-unsafe characters
 name = re.sub(r'[/<>:"\\|?*]', ' ', name)
 name = re.sub(r'\s+', ' ', name).strip()
-print(name or 'playlist')
-PY
-}
-
-canonicalize_playlist_filename() {
-  python - "$1" <<'PY'
-import re
-import sys
-import unicodedata
-
-name = sys.argv[1] or 'playlist'
-# Strip file extensions
-name = re.sub(r'\.(m3u8?|txt)$', '', name, flags=re.I)
-# Normalize Unicode (NFC for consistency)
-name = unicodedata.normalize('NFC', name)
-# Replace filesystem-unsafe characters only (keep everything else including emoji)
-name = re.sub(r'[/<>:"\\|?*]', ' ', name)
-# Collapse whitespace
-name = re.sub(r'\s+', ' ', name).strip()
-
 print(name or 'playlist')
 PY
 }
@@ -584,8 +596,14 @@ while true; do
 
     song_count=""
     playlist_file=""
-    # Resolve the canonical name: overrides -> name cache -> URL slug.
-    # Apply sanitize_filename + per-cycle case-insensitive collision suffix.
+    # Resolve the canonical name. Precedence (high -> low):
+    #   1. overrides.json (user-supplied)
+    #   2. name cache (Apple API title fetched earlier)
+    #   3. gamdl's source m3u basename (fs-mangled by gamdl's own sanitizer)
+    #   4. URL slug (last-resort fallback, looks like "pl.u-...")
+    # The cache-fetched API title beats gamdl's mangled basename because gamdl
+    # internally turns "+" into space, deletes "\" and "/", etc. — losing
+    # visual fidelity that the cache (and our own sanitize_filename) preserves.
     resolved_name=$(resolve_playlist_name "$playlist_url")
     target_name="$resolved_name"
     target_guess_m3u8="$PLAYLIST_M3U_DIR/${target_name}.m3u8"
@@ -594,9 +612,10 @@ while true; do
       ext="${latest_m3u##*.}"
       source_name=$(basename "$latest_m3u")
       source_name_no_ext="${source_name%.*}"
-      # Prefer the freshly-downloaded source name only when no override is in effect.
-      override_name=$(lookup_override_name "$playlist_url" || true)
-      if [ -z "$override_name" ]; then
+      # Only fall back to gamdl's source basename if resolve_playlist_name
+      # produced the URL-slug last-resort (no override AND no cache).
+      url_slug_fallback=$(sanitize_filename "$(playlist_filename_from_url "$playlist_url")" "$(playlist_short_id "$playlist_url")")
+      if [ "$resolved_name" = "$url_slug_fallback" ]; then
         target_name=$(sanitize_filename "$source_name_no_ext" "$(playlist_short_id "$playlist_url")")
       fi
       uniquify_playlist_name "$target_name" "$playlist_url" >/dev/null
@@ -633,10 +652,35 @@ PY
       target_name="$UNIQUE_NAME"
       target_guess_m3u8="$PLAYLIST_M3U_DIR/${target_name}.m3u8"
       target_guess_m3u="$PLAYLIST_M3U_DIR/${target_name}.m3u"
-      if [ -f "$target_guess_m3u8" ]; then
-        playlist_file="$target_guess_m3u8"
-      elif [ -f "$target_guess_m3u" ]; then
-        playlist_file="$target_guess_m3u"
+      # If a previously-recorded file exists at a stale (mangled) name and
+      # the resolved name now differs, rename it in place so the on-disk
+      # filename catches up with the corrected resolution.
+      previous_playlist_file=$(get_previous_playlist_file "$playlist_url")
+      if [ -n "$previous_playlist_file" ] && [ -f "$previous_playlist_file" ] \
+         && [ "$previous_playlist_file" != "$target_guess_m3u8" ] \
+         && [ "$previous_playlist_file" != "$target_guess_m3u" ]; then
+        prev_ext="${previous_playlist_file##*.}"
+        renamed_target="$PLAYLIST_M3U_DIR/${target_name}.${prev_ext}"
+        if [ "$previous_playlist_file" != "$renamed_target" ]; then
+          # Refuse to clobber an existing file at the new name — leave both
+          # in place and let the user resolve manually rather than silently
+          # destroy a sibling playlist that happens to share the resolved name.
+          if [ -e "$renamed_target" ]; then
+            echo "[$(date)] Warning: skipping stale-rename of '$previous_playlist_file' -> '$renamed_target' (target already exists)" >&2
+            playlist_file="$previous_playlist_file"
+          else
+            mv -f "$previous_playlist_file" "$renamed_target"
+            normalize_playlist_paths "$renamed_target"
+            playlist_file="$renamed_target"
+          fi
+        fi
+      fi
+      if [ -z "$playlist_file" ]; then
+        if [ -f "$target_guess_m3u8" ]; then
+          playlist_file="$target_guess_m3u8"
+        elif [ -f "$target_guess_m3u" ]; then
+          playlist_file="$target_guess_m3u"
+        fi
       fi
       # Keep the name cache in sync even when no fresh m3u landed — the
       # README claims the cache reflects the name actually in use.
