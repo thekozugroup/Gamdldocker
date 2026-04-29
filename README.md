@@ -85,6 +85,30 @@ One URL per line. `#` comments are allowed.
 
 If no playlists are configured, downloader stays alive and retries every 60s.
 
+## Playlist naming
+
+Playlist `.m3u8` files are written to `PLAYLIST_M3U_DIR` (default `/data/music/playlists`). Naming rules:
+
+1. **Source of truth.** The downloader uses Apple Music's stored playlist title, cached in `config/playlist-name-cache.json`. The web UI keeps this cache in sync as it resolves URLs against the Apple API.
+2. **Sanitization.** `\ / : * ? " < > |` and ASCII control characters are stripped from the title. Trailing dots/spaces are trimmed (Windows refuses them). Emoji and Unicode letters are preserved by default — `🪨 roll.m3u8`, `💍.m3u8`, and `¯\_(ツ)_/¯.m3u8` round-trip cleanly on ext4 / APFS / NTFS / Tailscale-served Syncthing peers.
+3. **Case-insensitive collision suffix.** If two playlists in the same cycle resolve to names that differ only in case (e.g. `Jams` and `jams`), the second one gets a `(<short-id>)` suffix (last 6 chars of the `pl.u-...` ID). This keeps both files visible on macOS HFS+/APFS, Windows NTFS, and exFAT.
+4. **Manual overrides.** When Apple's stored title is wrong (or you want a different display name), copy `config/playlist-overrides.json.example` to `config/playlist-overrides.json` and add entries:
+
+   ```json
+   {
+     "https://music.apple.com/us/playlist/jams/pl.u-EXAMPLE111111": "Bops"
+   }
+   ```
+
+   Overrides take precedence over the cached API name. Sanitization and collision suffixing still apply. The override file is gitignored; the example is tracked.
+5. **Cross-platform sync mode.** Set `SAFE_FILENAMES=true` in `.env` to additionally strip non-ASCII characters. Use this only when targeting legacy SMB or exFAT shares that mishandle UTF-8.
+
+Run the naming-helper tests locally:
+
+```bash
+bats tests/test_sanitize.bats
+```
+
 ## Key Environment Variables
 
 - `BIND_HOST=0.0.0.0` (host interface for WebUI; set to a Tailscale IP / `127.0.0.1` to restrict)
@@ -95,6 +119,8 @@ If no playlists are configured, downloader stays alive and retries every 60s.
 - `DOWNLOAD_MODE=nm3u8dlre`
 - `AUTO_UPDATE=true`
 - `AUTO_UPDATE_INTERVAL=86400`
+- `PLAYLIST_OVERRIDES_FILE=/config/playlist-overrides.json` (optional; absent = no overrides)
+- `SAFE_FILENAMES=false` (set `true` to strip non-ASCII for legacy SMB / exFAT)
 - `TZ=America/New_York`
 
 ## Restricting WebUI to a private interface

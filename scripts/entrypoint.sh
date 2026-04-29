@@ -2,7 +2,12 @@
 set -e
 set -o pipefail
 
-echo "Starting gamdl downloader service..."
+# When the test harness (bats) sources this file we just want the helper
+# function definitions, not the banner / main loop. Callers set
+# ENTRYPOINT_SOURCE_ONLY=1 before sourcing.
+if [ -z "${ENTRYPOINT_SOURCE_ONLY:-}" ]; then
+  echo "Starting gamdl downloader service..."
+fi
 
 FREQUENCY=${FREQUENCY:-3600}
 COOKIES_PATH=${COOKIES_PATH:-/config/cookies.txt}
@@ -15,29 +20,37 @@ AUTO_UPDATE=${AUTO_UPDATE:-true}
 AUTO_UPDATE_INTERVAL=${AUTO_UPDATE_INTERVAL:-86400}
 AUTO_UPDATE_GAMDL=${AUTO_UPDATE_GAMDL:-false}
 STATUS_FILE=/config/playlist-status.json
+NAME_CACHE_FILE=${NAME_CACHE_FILE:-/config/playlist-name-cache.json}
+PLAYLIST_OVERRIDES_FILE=${PLAYLIST_OVERRIDES_FILE:-/config/playlist-overrides.json}
+SAFE_FILENAMES=${SAFE_FILENAMES:-false}
 LAST_UPDATE_TS=0
+PYBIN=${PYBIN:-$(command -v python || command -v python3)}
 
-echo "Configuration:"
-echo "  Frequency: ${FREQUENCY} seconds"
-echo "  Cookies path: ${COOKIES_PATH}"
-echo "  Output directory: ${OUTPUT_DIR}"
-echo "  Playlist m3u directory: ${PLAYLIST_M3U_DIR}"
-echo "  Temp path: ${TEMP_PATH}"
-echo "  Download mode: ${DOWNLOAD_MODE}"
-echo "  Auto update: ${AUTO_UPDATE}"
-echo "  Auto update gamdl: ${AUTO_UPDATE_GAMDL}"
+if [ -z "${ENTRYPOINT_SOURCE_ONLY:-}" ]; then
+  echo "Configuration:"
+  echo "  Frequency: ${FREQUENCY} seconds"
+  echo "  Cookies path: ${COOKIES_PATH}"
+  echo "  Output directory: ${OUTPUT_DIR}"
+  echo "  Playlist m3u directory: ${PLAYLIST_M3U_DIR}"
+  echo "  Temp path: ${TEMP_PATH}"
+  echo "  Download mode: ${DOWNLOAD_MODE}"
+  echo "  Auto update: ${AUTO_UPDATE}"
+  echo "  Auto update gamdl: ${AUTO_UPDATE_GAMDL}"
+fi
 
-if ! command -v gamdl >/dev/null 2>&1; then
+if [ -z "${ENTRYPOINT_SOURCE_ONLY:-}" ] && ! command -v gamdl >/dev/null 2>&1; then
   echo "Error: gamdl is not installed"
   exit 1
 fi
 
-if [ ! -f "$COOKIES_PATH" ] && [ -f /config/music.apple.com_cookies.txt ]; then
-  cp /config/music.apple.com_cookies.txt "$COOKIES_PATH"
-fi
+if [ -z "${ENTRYPOINT_SOURCE_ONLY:-}" ]; then
+  if [ ! -f "$COOKIES_PATH" ] && [ -f /config/music.apple.com_cookies.txt ]; then
+    cp /config/music.apple.com_cookies.txt "$COOKIES_PATH"
+  fi
 
-if [ ! -f "$COOKIES_PATH" ]; then
-  echo "Warning: Cookies file not found at $COOKIES_PATH"
+  if [ ! -f "$COOKIES_PATH" ]; then
+    echo "Warning: Cookies file not found at $COOKIES_PATH"
+  fi
 fi
 
 refresh_runtime_settings() {
@@ -142,8 +155,189 @@ load_playlists() {
   fi
 }
 
+# Extract last 6 hex chars from a playlist URL ID like pl.u-XXXXXXXXXXXX.
+# Falls back to a hash of the URL if no pl.<...> id is present.
+playlist_short_id() {
+  "$PYBIN" - "$1" <<'PY'
+import hashlib
+import re
+import sys
+
+url = sys.argv[1]
+m = re.search(r'pl\.[A-Za-z0-9]+-?([A-Za-z0-9]+)', url)
+if m:
+    print(m.group(1)[-6:])
+else:
+    print(hashlib.sha1(url.encode('utf-8')).hexdigest()[:6])
+PY
+}
+
+# sanitize_filename: strip cross-platform-unsafe chars, collapse whitespace,
+# trim, drop trailing dots. Preserves Unicode (emoji, CJK, etc.) by default.
+# When SAFE_FILENAMES=true (env), strip non-ASCII as well.
+# Args: $1 = raw name, $2 = fallback (used when sanitized result is empty).
+sanitize_filename() {
+  SAFE_FILENAMES_ENV="$SAFE_FILENAMES" "$PYBIN" - "$1" "${2:-playlist}" <<'PY'
+import os
+import re
+import sys
+import unicodedata
+
+name = sys.argv[1] or ''
+fallback = sys.argv[2] or 'playlist'
+safe_mode = os.environ.get('SAFE_FILENAMES_ENV', 'false').lower() == 'true'
+
+name = unicodedata.normalize('NFC', name)
+# Strip ASCII control chars (\x00-\x1f) and the unsafe set \ / : * ? " < > |
+name = re.sub(r'[\x00-\x1f\\/:*?"<>|]', '', name)
+# Optional ASCII-only mode for legacy SMB / exFAT
+if safe_mode:
+    name = name.encode('ascii', 'ignore').decode('ascii')
+# Collapse whitespace runs
+name = re.sub(r'\s+', ' ', name).strip()
+# Trim trailing dots and spaces (Windows refuses them)
+name = re.sub(r'[.\s]+$', '', name)
+
+if not name:
+    name = fallback
+
+print(name)
+PY
+}
+
+# resolve_playlist_name: returns the final folder/filename (no extension)
+# Order: overrides.json -> name cache -> URL slug fallback. Sanitized.
+# Args: $1 = playlist URL.
+resolve_playlist_name() {
+  local playlist_url="$1"
+  local override
+  override=$(lookup_override_name "$playlist_url" || true)
+  if [ -n "$override" ]; then
+    sanitize_filename "$override" "$(playlist_short_id "$playlist_url")"
+    return
+  fi
+
+  local cached
+  cached=$(lookup_name_cache "$playlist_url" || true)
+  if [ -n "$cached" ]; then
+    sanitize_filename "$cached" "$(playlist_short_id "$playlist_url")"
+    return
+  fi
+
+  local slug
+  slug=$(playlist_filename_from_url "$playlist_url")
+  sanitize_filename "$slug" "$(playlist_short_id "$playlist_url")"
+}
+
+lookup_override_name() {
+  [ -f "$PLAYLIST_OVERRIDES_FILE" ] || { echo ""; return; }
+  "$PYBIN" - "$PLAYLIST_OVERRIDES_FILE" "$1" <<'PY'
+import json
+import sys
+
+path, url = sys.argv[1], sys.argv[2]
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+except Exception:
+    print('')
+    raise SystemExit
+val = data.get(url)
+if isinstance(val, str):
+    print(val)
+else:
+    print('')
+PY
+}
+
+lookup_name_cache() {
+  [ -f "$NAME_CACHE_FILE" ] || { echo ""; return; }
+  "$PYBIN" - "$NAME_CACHE_FILE" "$1" <<'PY'
+import json
+import sys
+
+path, url = sys.argv[1], sys.argv[2]
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+except Exception:
+    print('')
+    raise SystemExit
+entry = data.get(url)
+if isinstance(entry, str):
+    print(entry)
+elif isinstance(entry, dict):
+    name = entry.get('name')
+    print(name if isinstance(name, str) else '')
+else:
+    print('')
+PY
+}
+
+# _lower: lowercase a string via tr. Extracted so uniquify_playlist_name has
+# one canonical lowercasing call site (was duplicated inline).
+_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# uniquify_playlist_name: given a sanitized name and URL, append " (<short-id>)"
+# on case-insensitive collision within this run. Uses the global SEEN_LC array.
+# Args: $1 = sanitized name, $2 = playlist URL.
+# Sets the global UNIQUE_NAME and also prints the deduped name on stdout.
+# Note: when called via $(...) the SEEN_LC update happens in a subshell and
+# is lost. Callers that need the collision tracker to persist should invoke
+# this function directly and read $UNIQUE_NAME instead of using command
+# substitution.
+uniquify_playlist_name() {
+  local name="$1"
+  local playlist_url="$2"
+  local lc
+  lc=$(_lower "$name")
+  if [ -n "${SEEN_LC[$lc]:-}" ]; then
+    local short
+    short=$(playlist_short_id "$playlist_url")
+    name="${name} (${short})"
+    lc=$(_lower "$name")
+  fi
+  SEEN_LC[$lc]=1
+  UNIQUE_NAME="$name"
+  printf '%s' "$name"
+}
+
+# Update name cache with the resolved name (so subsequent runs are deterministic)
+update_name_cache_entry() {
+  local playlist_url="$1"
+  local resolved_name="$2"
+  "$PYBIN" - "$NAME_CACHE_FILE" "$playlist_url" "$resolved_name" <<'PY'
+import json
+import os
+import sys
+
+path, url, name = sys.argv[1], sys.argv[2], sys.argv[3]
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+entry = data.get(url) or {}
+if isinstance(entry, str):
+    entry = {'name': entry}
+entry['name'] = name
+data[url] = entry
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2)
+try:
+    os.chmod(path, 0o600)
+except OSError:
+    pass
+PY
+}
+
 playlist_filename_from_url() {
-  python - "$1" <<'PY'
+  "$PYBIN" - "$1" <<'PY'
 from urllib.parse import urlparse, unquote
 import re
 import sys
@@ -339,8 +533,12 @@ GAMDL_ARGS=(
   --temp-path "$TEMP_PATH"
 )
 
-if gamdl --help 2>/dev/null | grep -q -- '--download-mode'; then
+if [ -z "${ENTRYPOINT_SOURCE_ONLY:-}" ] && gamdl --help 2>/dev/null | grep -q -- '--download-mode'; then
   GAMDL_ARGS+=(--download-mode "$DOWNLOAD_MODE")
+fi
+
+if [ -n "${ENTRYPOINT_SOURCE_ONLY:-}" ]; then
+  return 0 2>/dev/null || exit 0
 fi
 
 while true; do
@@ -359,6 +557,9 @@ while true; do
   migrate_existing_playlist_files
   cleanup_legacy_slug_files
   initialize_statuses_idle
+
+  # Reset case-insensitive collision tracker for this cycle.
+  declare -A SEEN_LC=()
 
   for playlist_url in "${PLAYLIST_URLS_ARRAY[@]}"; do
     echo "[$(date)] Processing playlist: $playlist_url"
@@ -383,18 +584,28 @@ while true; do
 
     song_count=""
     playlist_file=""
-    target_name=$(playlist_filename_from_url "$playlist_url")
+    # Resolve the canonical name: overrides -> name cache -> URL slug.
+    # Apply sanitize_filename + per-cycle case-insensitive collision suffix.
+    resolved_name=$(resolve_playlist_name "$playlist_url")
+    target_name="$resolved_name"
     target_guess_m3u8="$PLAYLIST_M3U_DIR/${target_name}.m3u8"
     target_guess_m3u="$PLAYLIST_M3U_DIR/${target_name}.m3u"
     if [ -n "$latest_m3u" ]; then
       ext="${latest_m3u##*.}"
       source_name=$(basename "$latest_m3u")
       source_name_no_ext="${source_name%.*}"
-      target_name=$(canonicalize_playlist_filename "$source_name_no_ext")
+      # Prefer the freshly-downloaded source name only when no override is in effect.
+      override_name=$(lookup_override_name "$playlist_url" || true)
+      if [ -z "$override_name" ]; then
+        target_name=$(sanitize_filename "$source_name_no_ext" "$(playlist_short_id "$playlist_url")")
+      fi
+      uniquify_playlist_name "$target_name" "$playlist_url" >/dev/null
+      target_name="$UNIQUE_NAME"
       target_path="$PLAYLIST_M3U_DIR/${target_name}.${ext}"
       if [ "$latest_m3u" != "$target_path" ]; then
         mv -f "$latest_m3u" "$target_path"
       fi
+      update_name_cache_entry "$playlist_url" "$target_name"
 
       previous_playlist_file=$(get_previous_playlist_file "$playlist_url")
       if [ -n "$previous_playlist_file" ] && [ "$previous_playlist_file" != "$target_path" ] && [ -f "$previous_playlist_file" ]; then
@@ -416,11 +627,20 @@ print(count)
 PY
 )
     else
+      # No fresh m3u this cycle; reserve the name in the collision tracker
+      # so a later playlist with the same lowercased name gets the suffix.
+      uniquify_playlist_name "$target_name" "$playlist_url" >/dev/null
+      target_name="$UNIQUE_NAME"
+      target_guess_m3u8="$PLAYLIST_M3U_DIR/${target_name}.m3u8"
+      target_guess_m3u="$PLAYLIST_M3U_DIR/${target_name}.m3u"
       if [ -f "$target_guess_m3u8" ]; then
         playlist_file="$target_guess_m3u8"
       elif [ -f "$target_guess_m3u" ]; then
         playlist_file="$target_guess_m3u"
       fi
+      # Keep the name cache in sync even when no fresh m3u landed — the
+      # README claims the cache reflects the name actually in use.
+      update_name_cache_entry "$playlist_url" "$target_name"
       if [ -n "$playlist_file" ]; then
         song_count=$(python - "$playlist_file" <<'PY'
 import sys

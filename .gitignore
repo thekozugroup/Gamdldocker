@@ -38,6 +38,8 @@ config/cookies.txt
 config/music.apple.com_cookies.txt
 config/playlist-name-cache.json
 config/playlist-status.json
+config/playlist-overrides.json
+!config/playlist-overrides.json.example
 music.apple.com_cookies.txt
 
 # Runtime data

@@ -1,0 +1,5 @@
+{
+  "_comment": "Optional manual overrides for playlist folder/filename. Copy this file to playlist-overrides.json and edit. Keys are full Apple Music playlist URLs; values are the desired display name (without extension). Overrides take precedence over the cached Apple API title, so use them when Apple's stored title is wrong (e.g. wrong casing) or when two playlists collide on case-insensitive filesystems. Filenames are still sanitized: \\ / : * ? \" < > | and ASCII control chars are stripped, trailing dots/spaces trimmed. Emoji and non-ASCII letters are preserved unless SAFE_FILENAMES=true.",
+  "https://music.apple.com/us/playlist/jams/pl.u-EXAMPLE111111": "Bops",
+  "https://music.apple.com/us/playlist/jams/pl.u-EXAMPLE222222": "Jams (workout)"
+}

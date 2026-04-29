@@ -1,18 +1,40 @@
 "use client"
 
 import { ChangeEvent, useEffect, useMemo, useState } from 'react'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/card'
-import { Button } from './components/button'
-import { Input } from './components/input'
-import { Badge } from './components/badge'
-import { Switch } from './components/switch'
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+} from '@/components/ui/sidebar'
+import { Separator } from '@/components/ui/separator'
 import {
   AlertCircle,
   CheckCircle2,
   ChevronDown,
-  Clock,
+  Cookie,
   Download,
   HardDrive,
+  ListMusic,
   Loader2,
   Monitor,
   Moon,
@@ -87,7 +109,7 @@ const defaultSettings: SettingsState = {
 }
 
 // ---------------------------------------------------------------------------
-// Status helpers
+// Helpers
 // ---------------------------------------------------------------------------
 
 function statusDot(status: Playlist['status']) {
@@ -146,7 +168,7 @@ function formatFrequency(seconds: number) {
 export default function Dashboard() {
   const [playlists, setPlaylists] = useState<Playlist[]>([])
   const [newPlaylistUrl, setNewPlaylistUrl] = useState('')
-  const [activeTab, setActiveTab] = useState<'playlists' | 'settings'>('playlists')
+  const [activeTab, setActiveTab] = useState<'playlists' | 'settings' | 'cookies' | 'logs'>('playlists')
   const [settings, setSettings] = useState<SettingsState>(defaultSettings)
   const [cookieStatus, setCookieStatus] = useState<CookieStatus>({})
   const [uploadingCookies, setUploadingCookies] = useState(false)
@@ -154,12 +176,12 @@ export default function Dashboard() {
   const [isSaving, setIsSaving] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
-  const [themeMode, setThemeMode] = useState<ThemeMode>('system')
+  const [themeMode, setThemeMode] = useState<ThemeMode>('dark')
   const [logsText, setLogsText] = useState('')
   const [logsUpdatedAt, setLogsUpdatedAt] = useState<string | null>(null)
   const [logsSummary, setLogsSummary] = useState<Record<string, number>>({})
   const [isLogsLoading, setIsLogsLoading] = useState(false)
-  const [logsExpanded, setLogsExpanded] = useState(false)
+  const [logsExpanded, setLogsExpanded] = useState(true)
 
   // ---- Data fetching ----
 
@@ -193,7 +215,7 @@ export default function Dashboard() {
   }, [themeMode])
 
   useEffect(() => {
-    if (activeTab !== 'settings') return
+    if (activeTab !== 'logs' && activeTab !== 'settings') return
     void fetchLogs()
     const timer = window.setInterval(() => void fetchLogs(), 20000)
     return () => window.clearInterval(timer)
@@ -365,403 +387,408 @@ export default function Dashboard() {
   }
   const ThemeIcon = themeMode === 'light' ? Sun : themeMode === 'dark' ? Moon : Monitor
 
+  // ---- Sidebar nav ----
+
+  const navItems: { key: typeof activeTab; label: string; icon: typeof ListMusic }[] = [
+    { key: 'playlists', label: 'Playlists', icon: ListMusic },
+    { key: 'settings', label: 'Settings', icon: Settings2 },
+    { key: 'cookies', label: 'Cookies', icon: Cookie },
+    { key: 'logs', label: 'Logs', icon: Terminal },
+  ]
+
   // ---- Render ----
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* ---- Toolbar ---- */}
-      <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur-xl supports-[backdrop-filter]:bg-background/60">
-        <div className="mx-auto flex h-14 max-w-3xl items-center justify-between px-4">
-          <div className="flex items-center gap-2.5">
-            <Music2 className="h-5 w-5 text-foreground/80" />
-            <span className="text-[15px] font-semibold tracking-tight">Gamdl</span>
+    <SidebarProvider>
+      <Sidebar>
+        <SidebarHeader>
+          <div className="flex items-center gap-2 px-2 py-2">
+            <Music2 className="h-5 w-5 text-primary" />
+            <span className="text-sm font-semibold tracking-tight">Gamdl</span>
           </div>
+        </SidebarHeader>
+        <SidebarContent>
+          <SidebarGroup>
+            <SidebarGroupLabel>Navigation</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {navItems.map((item) => {
+                  const Icon = item.icon
+                  return (
+                    <SidebarMenuItem key={item.key}>
+                      <SidebarMenuButton
+                        isActive={activeTab === item.key}
+                        onClick={() => setActiveTab(item.key)}
+                      >
+                        <Icon className="h-4 w-4" />
+                        <span>{item.label}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  )
+                })}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        </SidebarContent>
+      </Sidebar>
 
-          <div className="flex items-center gap-1">
-            {/* Tab switcher */}
-            <div className="mr-2 flex rounded-lg border bg-muted/50 p-0.5">
-              <button
-                onClick={() => setActiveTab('playlists')}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                  activeTab === 'playlists'
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Playlists
-              </button>
-              <button
-                onClick={() => setActiveTab('settings')}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                  activeTab === 'settings'
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Settings
-              </button>
-            </div>
-
-            {/* Theme toggle */}
-            <button
-              onClick={nextTheme}
-              className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              title={`Theme: ${themeMode}`}
-            >
-              <ThemeIcon className="h-4 w-4" />
-            </button>
+      <SidebarInset>
+        {/* Header */}
+        <header className="sticky top-0 z-40 flex h-14 items-center justify-between border-b bg-background/80 px-4 backdrop-blur-xl supports-[backdrop-filter]:bg-background/60">
+          <div className="flex items-center gap-2">
+            <SidebarTrigger />
+            <Separator orientation="vertical" className="h-5" />
+            <span className="text-sm font-medium capitalize">{activeTab}</span>
           </div>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-3xl space-y-4 px-4 py-5">
-        {/* ---- Toast ---- */}
-        {notice && (
-          <div
-            className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm ${
-              notice.type === 'success'
-                ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300'
-                : 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-300'
-            }`}
+          <button
+            onClick={nextTheme}
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title={`Theme: ${themeMode}`}
           >
-            {notice.type === 'success' ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <AlertCircle className="h-4 w-4 shrink-0" />}
-            {notice.text}
-          </div>
-        )}
+            <ThemeIcon className="h-4 w-4" />
+          </button>
+        </header>
 
-        {/* ============================================================ */}
-        {/* PLAYLISTS TAB                                                 */}
-        {/* ============================================================ */}
-        {activeTab === 'playlists' ? (
-          <>
-            {/* ---- Stats row ---- */}
-            <div className="grid grid-cols-3 gap-3">
-              <div className="rounded-lg border bg-card p-3.5">
-                <p className="text-xs text-muted-foreground">Playlists</p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums">{summary.count}</p>
-              </div>
-              <div className="rounded-lg border bg-card p-3.5">
-                <p className="text-xs text-muted-foreground">Total Songs</p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums">{summary.totalSongs.toLocaleString()}</p>
-              </div>
-              <div className="rounded-lg border bg-card p-3.5">
-                <p className="text-xs text-muted-foreground">Interval</p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums">{formatFrequency(settings.frequency)}</p>
-              </div>
+        <main className="mx-auto w-full max-w-3xl space-y-4 px-4 py-5">
+          {/* Notice */}
+          {notice && (
+            <div
+              className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm ${
+                notice.type === 'success'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300'
+                  : 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-300'
+              }`}
+            >
+              {notice.type === 'success' ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <AlertCircle className="h-4 w-4 shrink-0" />}
+              {notice.text}
             </div>
+          )}
 
-            {/* ---- Add playlist ---- */}
-            <Card>
-              <CardContent className="flex gap-2 pt-5 pb-5">
-                <Input
-                  value={newPlaylistUrl}
-                  onChange={(e) => setNewPlaylistUrl(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addPlaylist()}
-                  placeholder="Paste Apple Music playlist URL..."
-                  className="h-9 text-sm"
-                />
-                <Button onClick={addPlaylist} disabled={!newPlaylistUrl.trim() || isLoading} size="sm" className="h-9 shrink-0 gap-1.5">
-                  {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-                  Add
-                </Button>
-              </CardContent>
-            </Card>
+          <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)} className="space-y-4">
+            <TabsList className="grid w-full grid-cols-4">
+              <TabsTrigger value="playlists">Playlists</TabsTrigger>
+              <TabsTrigger value="settings">Settings</TabsTrigger>
+              <TabsTrigger value="cookies">Cookies</TabsTrigger>
+              <TabsTrigger value="logs">Logs</TabsTrigger>
+            </TabsList>
 
-            {/* ---- Playlist list ---- */}
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-                <CardTitle className="text-base font-semibold">Library</CardTitle>
-                <Button
-                  onClick={triggerDownload}
-                  disabled={isDownloading || playlists.length === 0}
-                  size="sm"
-                  variant="outline"
-                  className="h-8 gap-1.5 text-xs"
-                >
-                  {isDownloading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-                  Sync Now
-                </Button>
-              </CardHeader>
-              <CardContent className="pt-0">
-                {playlists.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-12 text-center">
-                    <Music2 className="mb-3 h-8 w-8 text-muted-foreground/40" />
-                    <p className="text-sm text-muted-foreground">No playlists yet</p>
-                    <p className="mt-1 text-xs text-muted-foreground/60">Add an Apple Music URL above to get started</p>
-                  </div>
-                ) : (
-                  <div className="divide-y rounded-lg border">
-                    {playlists.map((playlist) => (
-                      <div key={playlist.id} className="flex items-center gap-3 px-3.5 py-3">
-                        {/* Status dot */}
-                        <div className="flex shrink-0 items-center">{statusDot(playlist.status)}</div>
-
-                        {/* Name + URL */}
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium leading-snug">{playlist.name}</p>
-                          <p className="mt-0.5 truncate text-xs text-muted-foreground">{playlist.url}</p>
-                        </div>
-
-                        {/* Meta */}
-                        <div className="hidden shrink-0 text-right sm:block">
-                          <p className="text-xs tabular-nums text-muted-foreground">
-                            {playlist.songCount ? `${playlist.songCount} songs` : ''}
-                          </p>
-                          <p className="text-xs text-muted-foreground/60">
-                            {formatRelative(playlist.lastDownloaded)}
-                          </p>
-                        </div>
-
-                        {/* Status label */}
-                        <Badge
-                          variant="secondary"
-                          className={`hidden shrink-0 text-[11px] sm:inline-flex ${
-                            playlist.status === 'running'
-                              ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300'
-                              : playlist.status === 'failed'
-                              ? 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-300'
-                              : playlist.status === 'complete'
-                              ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300'
-                              : ''
-                          }`}
-                        >
-                          {statusLabel(playlist.status)}
-                        </Badge>
-
-                        {/* Delete */}
-                        <button
-                          onClick={() => removePlaylist(playlist.url)}
-                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive"
-                          title="Remove"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </>
-        ) : (
-          /* ============================================================ */
-          /* SETTINGS TAB                                                  */
-          /* ============================================================ */
-          <>
-            {/* ---- Cookie auth ---- */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                  <Shield className="h-4 w-4 text-muted-foreground" /> Authentication
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3 pt-0">
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <span className={`inline-flex h-2 w-2 rounded-full ${cookieStatus.exists ? 'bg-emerald-500' : 'bg-zinc-300 dark:bg-zinc-600'}`} />
-                  <span className="text-muted-foreground">
-                    {cookieStatus.exists ? 'Cookie loaded' : 'No cookie file'}
-                  </span>
-                  {cookieStatus.updatedAt && (
-                    <span className="text-xs text-muted-foreground/60">
-                      Updated {formatRelative(cookieStatus.updatedAt)}
-                    </span>
-                  )}
+            {/* PLAYLISTS */}
+            <TabsContent value="playlists" className="space-y-4">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-lg border bg-card p-3.5">
+                  <p className="text-xs text-muted-foreground">Playlists</p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums">{summary.count}</p>
                 </div>
-                <label className="inline-flex cursor-pointer items-center gap-2">
-                  <input className="hidden" type="file" accept=".txt" onChange={handleCookieUpload} />
-                  <span className="inline-flex h-8 items-center gap-1.5 rounded-md border bg-background px-3 text-xs font-medium transition-colors hover:bg-muted">
-                    {uploadingCookies ? (
-                      <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Uploading...</>
-                    ) : (
-                      <><Upload className="h-3.5 w-3.5" /> Upload cookies.txt</>
-                    )}
-                  </span>
-                </label>
-              </CardContent>
-            </Card>
+                <div className="rounded-lg border bg-card p-3.5">
+                  <p className="text-xs text-muted-foreground">Total Songs</p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums">{summary.totalSongs.toLocaleString()}</p>
+                </div>
+                <div className="rounded-lg border bg-card p-3.5">
+                  <p className="text-xs text-muted-foreground">Interval</p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums">{formatFrequency(settings.frequency)}</p>
+                </div>
+              </div>
 
-            {/* ---- Downloader settings ---- */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                  <Settings2 className="h-4 w-4 text-muted-foreground" /> Downloader
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4 pt-0">
-                {/* Row: frequency + format */}
-                <div className="grid gap-4 sm:grid-cols-2">
+              <Card>
+                <CardContent className="flex gap-2 pt-5 pb-5">
+                  <Input
+                    value={newPlaylistUrl}
+                    onChange={(e) => setNewPlaylistUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && addPlaylist()}
+                    placeholder="Paste Apple Music playlist URL..."
+                    className="h-9 text-sm"
+                  />
+                  <Button onClick={addPlaylist} disabled={!newPlaylistUrl.trim() || isLoading} size="sm" className="h-9 shrink-0 gap-1.5">
+                    {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                    Add
+                  </Button>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+                  <CardTitle className="text-base font-semibold">Library</CardTitle>
+                  <Button
+                    onClick={triggerDownload}
+                    disabled={isDownloading || playlists.length === 0}
+                    size="sm"
+                    variant="outline"
+                    className="h-8 gap-1.5 text-xs"
+                  >
+                    {isDownloading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                    Sync Now
+                  </Button>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  {playlists.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-12 text-center">
+                      <Music2 className="mb-3 h-8 w-8 text-muted-foreground/40" />
+                      <p className="text-sm text-muted-foreground">No playlists yet</p>
+                      <p className="mt-1 text-xs text-muted-foreground/60">Add an Apple Music URL above to get started</p>
+                    </div>
+                  ) : (
+                    <div className="divide-y rounded-lg border">
+                      {playlists.map((playlist) => (
+                        <div key={playlist.id} className="flex items-center gap-3 px-3.5 py-3">
+                          <div className="flex shrink-0 items-center">{statusDot(playlist.status)}</div>
+
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium leading-snug">{playlist.name}</p>
+                            <p className="mt-0.5 truncate text-xs text-muted-foreground">{playlist.url}</p>
+                          </div>
+
+                          <div className="hidden shrink-0 text-right sm:block">
+                            <p className="text-xs tabular-nums text-muted-foreground">
+                              {playlist.songCount ? `${playlist.songCount} songs` : ''}
+                            </p>
+                            <p className="text-xs text-muted-foreground/60">
+                              {formatRelative(playlist.lastDownloaded)}
+                            </p>
+                          </div>
+
+                          <Badge
+                            variant="secondary"
+                            className={`hidden shrink-0 text-[11px] sm:inline-flex ${
+                              playlist.status === 'running'
+                                ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300'
+                                : playlist.status === 'failed'
+                                ? 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-300'
+                                : playlist.status === 'complete'
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300'
+                                : ''
+                            }`}
+                          >
+                            {statusLabel(playlist.status)}
+                          </Badge>
+
+                          <button
+                            onClick={() => removePlaylist(playlist.url)}
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive"
+                            title="Remove"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* SETTINGS */}
+            <TabsContent value="settings" className="space-y-4">
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                    <Settings2 className="h-4 w-4 text-muted-foreground" /> Downloader
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4 pt-0">
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground">Sync Interval (seconds)</label>
+                      <Input
+                        value={String(settings.frequency)}
+                        onChange={(e) => setSettings({ ...settings, frequency: Number(e.target.value) || 3600 })}
+                        className="h-9 text-sm"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground">Format</label>
+                      <div className="flex gap-1.5">
+                        {['m4a', 'mp3', 'flac'].map((format) => (
+                          <button
+                            key={format}
+                            onClick={() => setSettings({ ...settings, fileFormat: format })}
+                            className={`flex-1 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors ${
+                              settings.fileFormat === format
+                                ? 'border-primary/40 bg-primary text-primary-foreground'
+                                : 'border-border bg-background text-muted-foreground hover:text-foreground'
+                            }`}
+                          >
+                            {format.toUpperCase()}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Sync Interval (seconds)</label>
+                    <label className="text-xs font-medium text-muted-foreground">Output Location</label>
+                    <div className="flex items-center gap-2">
+                      <HardDrive className="h-4 w-4 shrink-0 text-muted-foreground/50" />
+                      <Input
+                        value={settings.outputLocation}
+                        onChange={(e) => {
+                          const outputLocation = e.target.value
+                          const currentDefault = `${settings.outputLocation.replace(/\/$/, '')}/playlists`
+                          const playlistM3uDir =
+                            settings.playlistM3uDir === currentDefault
+                              ? `${outputLocation.replace(/\/$/, '')}/playlists`
+                              : settings.playlistM3uDir
+                          setSettings({ ...settings, outputLocation, playlistM3uDir })
+                        }}
+                        className="h-9 font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">Playlist M3U Folder</label>
                     <Input
-                      value={String(settings.frequency)}
-                      onChange={(e) => setSettings({ ...settings, frequency: Number(e.target.value) || 3600 })}
-                      className="h-9 text-sm"
+                      value={settings.playlistM3uDir}
+                      onChange={(e) => setSettings({ ...settings, playlistM3uDir: e.target.value })}
+                      className="h-9 font-mono text-xs"
                     />
                   </div>
+
                   <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Format</label>
+                    <label className="text-xs font-medium text-muted-foreground">Folder Structure</label>
+                    <Input
+                      value={settings.outputStructure}
+                      onChange={(e) => setSettings({ ...settings, outputStructure: e.target.value })}
+                      className="h-9 font-mono text-xs"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">Download Engine</label>
                     <div className="flex gap-1.5">
-                      {['m4a', 'mp3', 'flac'].map((format) => (
+                      {[
+                        { value: 'nm3u8dlre', label: 'N_m3u8DL-RE' },
+                        { value: 'ffmpeg', label: 'FFmpeg' },
+                      ].map((mode) => (
                         <button
-                          key={format}
-                          onClick={() => setSettings({ ...settings, fileFormat: format })}
-                          className={`flex-1 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors ${
-                            settings.fileFormat === format
-                              ? 'border-foreground/20 bg-foreground text-background'
+                          key={mode.value}
+                          onClick={() => setSettings({ ...settings, downloadMode: mode.value })}
+                          className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                            settings.downloadMode === mode.value
+                              ? 'border-primary/40 bg-primary text-primary-foreground'
                               : 'border-border bg-background text-muted-foreground hover:text-foreground'
                           }`}
                         >
-                          {format.toUpperCase()}
+                          {mode.label}
                         </button>
                       ))}
                     </div>
                   </div>
-                </div>
 
-                {/* Row: output location */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-muted-foreground">Output Location</label>
-                  <div className="flex items-center gap-2">
-                    <HardDrive className="h-4 w-4 shrink-0 text-muted-foreground/50" />
-                    <Input
-                      value={settings.outputLocation}
-                      onChange={(e) => {
-                        const outputLocation = e.target.value
-                        const currentDefault = `${settings.outputLocation.replace(/\/$/, '')}/playlists`
-                        const playlistM3uDir =
-                          settings.playlistM3uDir === currentDefault
-                            ? `${outputLocation.replace(/\/$/, '')}/playlists`
-                            : settings.playlistM3uDir
-                        setSettings({ ...settings, outputLocation, playlistM3uDir })
-                      }}
-                      className="h-9 font-mono text-xs"
-                    />
-                  </div>
-                </div>
-
-                {/* Row: playlist m3u dir */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-muted-foreground">Playlist M3U Folder</label>
-                  <Input
-                    value={settings.playlistM3uDir}
-                    onChange={(e) => setSettings({ ...settings, playlistM3uDir: e.target.value })}
-                    className="h-9 font-mono text-xs"
-                  />
-                </div>
-
-                {/* Row: output structure */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-muted-foreground">Folder Structure</label>
-                  <Input
-                    value={settings.outputStructure}
-                    onChange={(e) => setSettings({ ...settings, outputStructure: e.target.value })}
-                    className="h-9 font-mono text-xs"
-                  />
-                </div>
-
-                {/* Row: download mode */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-muted-foreground">Download Engine</label>
-                  <div className="flex gap-1.5">
-                    {[
-                      { value: 'nm3u8dlre', label: 'N_m3u8DL-RE' },
-                      { value: 'ffmpeg', label: 'FFmpeg' },
-                    ].map((mode) => (
-                      <button
-                        key={mode.value}
-                        onClick={() => setSettings({ ...settings, downloadMode: mode.value })}
-                        className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
-                          settings.downloadMode === mode.value
-                            ? 'border-foreground/20 bg-foreground text-background'
-                            : 'border-border bg-background text-muted-foreground hover:text-foreground'
-                        }`}
-                      >
-                        {mode.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Toggles */}
-                <div className="space-y-3 rounded-lg border p-3.5">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">Auto-update tools</p>
-                      <p className="text-xs text-muted-foreground">Keep gamdl and N_m3u8DL-RE current</p>
-                    </div>
-                    <Switch
-                      checked={settings.autoUpdate}
-                      onCheckedChange={(checked) => setSettings({ ...settings, autoUpdate: checked })}
-                    />
-                  </div>
-                  {settings.autoUpdate && (
-                    <div className="flex items-center justify-between border-t pt-3">
-                      <label className="text-xs text-muted-foreground">Update interval</label>
-                      <Input
-                        value={String(settings.autoUpdateInterval)}
-                        onChange={(e) => setSettings({ ...settings, autoUpdateInterval: Number(e.target.value) || 86400 })}
-                        className="h-7 w-24 text-right font-mono text-xs"
+                  <div className="space-y-3 rounded-lg border p-3.5">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium">Auto-update tools</p>
+                        <p className="text-xs text-muted-foreground">Keep gamdl and N_m3u8DL-RE current</p>
+                      </div>
+                      <Switch
+                        checked={settings.autoUpdate}
+                        onCheckedChange={(checked) => setSettings({ ...settings, autoUpdate: checked })}
                       />
                     </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* ---- Save bar ---- */}
-            <div className="flex items-center justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => void fetchSettings()} className="h-8 gap-1.5 text-xs">
-                <RefreshCw className="h-3.5 w-3.5" /> Reset
-              </Button>
-              <Button size="sm" onClick={saveSettings} disabled={isSaving} className="h-8 gap-1.5 text-xs">
-                {isSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-                Save
-              </Button>
-            </div>
-
-            {/* ---- Logs ---- */}
-            <Card>
-              <CardHeader className="pb-2">
-                <button
-                  onClick={() => { setLogsExpanded(!logsExpanded); if (!logsExpanded) void fetchLogs() }}
-                  className="flex w-full items-center justify-between"
-                >
-                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                    <Terminal className="h-4 w-4 text-muted-foreground" /> Logs
-                  </CardTitle>
-                  <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${logsExpanded ? 'rotate-180' : ''}`} />
-                </button>
-              </CardHeader>
-              {logsExpanded && (
-                <CardContent className="space-y-3 pt-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <span className="tabular-nums">{logsSummary.complete || 0} synced</span>
-                      <span className="text-border">/</span>
-                      <span className="tabular-nums">{logsSummary.running || 0} active</span>
-                      <span className="text-border">/</span>
-                      <span className="tabular-nums">{logsSummary.failed || 0} failed</span>
-                    </div>
-                    <div className="ml-auto flex items-center gap-2">
-                      {logsUpdatedAt && (
-                        <span className="text-xs text-muted-foreground/50">
-                          {new Date(logsUpdatedAt).toLocaleTimeString()}
-                        </span>
-                      )}
-                      <Button variant="ghost" size="sm" onClick={() => void fetchLogs()} disabled={isLogsLoading} className="h-7 w-7 p-0">
-                        <RefreshCw className={`h-3.5 w-3.5 ${isLogsLoading ? 'animate-spin' : ''}`} />
-                      </Button>
-                    </div>
+                    {settings.autoUpdate && (
+                      <div className="flex items-center justify-between border-t pt-3">
+                        <label className="text-xs text-muted-foreground">Update interval</label>
+                        <Input
+                          value={String(settings.autoUpdateInterval)}
+                          onChange={(e) => setSettings({ ...settings, autoUpdateInterval: Number(e.target.value) || 86400 })}
+                          className="h-7 w-24 text-right font-mono text-xs"
+                        />
+                      </div>
+                    )}
                   </div>
-                  <pre className="max-h-64 overflow-auto rounded-lg border bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                    {logsText || 'No logs available.'}
-                  </pre>
                 </CardContent>
-              )}
-            </Card>
-          </>
-        )}
-      </main>
-    </div>
+              </Card>
+
+              <div className="flex items-center justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={() => void fetchSettings()} className="h-8 gap-1.5 text-xs">
+                  <RefreshCw className="h-3.5 w-3.5" /> Reset
+                </Button>
+                <Button size="sm" onClick={saveSettings} disabled={isSaving} className="h-8 gap-1.5 text-xs">
+                  {isSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                  Save
+                </Button>
+              </div>
+            </TabsContent>
+
+            {/* COOKIES */}
+            <TabsContent value="cookies" className="space-y-4">
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                    <Shield className="h-4 w-4 text-muted-foreground" /> Authentication
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3 pt-0">
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className={`inline-flex h-2 w-2 rounded-full ${cookieStatus.exists ? 'bg-emerald-500' : 'bg-zinc-300 dark:bg-zinc-600'}`} />
+                    <span className="text-muted-foreground">
+                      {cookieStatus.exists ? 'Cookie loaded' : 'No cookie file'}
+                    </span>
+                    {cookieStatus.updatedAt && (
+                      <span className="text-xs text-muted-foreground/60">
+                        Updated {formatRelative(cookieStatus.updatedAt)}
+                      </span>
+                    )}
+                  </div>
+                  <label className="inline-flex cursor-pointer items-center gap-2">
+                    <input className="hidden" type="file" accept=".txt" onChange={handleCookieUpload} />
+                    <span className="inline-flex h-8 items-center gap-1.5 rounded-md border bg-background px-3 text-xs font-medium transition-colors hover:bg-muted">
+                      {uploadingCookies ? (
+                        <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Uploading...</>
+                      ) : (
+                        <><Upload className="h-3.5 w-3.5" /> Upload cookies.txt</>
+                      )}
+                    </span>
+                  </label>
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* LOGS */}
+            <TabsContent value="logs" className="space-y-4">
+              <Card>
+                <CardHeader className="pb-2">
+                  <button
+                    onClick={() => { setLogsExpanded(!logsExpanded); if (!logsExpanded) void fetchLogs() }}
+                    className="flex w-full items-center justify-between"
+                  >
+                    <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                      <Terminal className="h-4 w-4 text-muted-foreground" /> Logs
+                    </CardTitle>
+                    <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${logsExpanded ? 'rotate-180' : ''}`} />
+                  </button>
+                </CardHeader>
+                {logsExpanded && (
+                  <CardContent className="space-y-3 pt-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <span className="tabular-nums">{logsSummary.complete || 0} synced</span>
+                        <span className="text-border">/</span>
+                        <span className="tabular-nums">{logsSummary.running || 0} active</span>
+                        <span className="text-border">/</span>
+                        <span className="tabular-nums">{logsSummary.failed || 0} failed</span>
+                      </div>
+                      <div className="ml-auto flex items-center gap-2">
+                        {logsUpdatedAt && (
+                          <span className="text-xs text-muted-foreground/50">
+                            {new Date(logsUpdatedAt).toLocaleTimeString()}
+                          </span>
+                        )}
+                        <Button variant="ghost" size="sm" onClick={() => void fetchLogs()} disabled={isLogsLoading} className="h-7 w-7 p-0">
+                          <RefreshCw className={`h-3.5 w-3.5 ${isLogsLoading ? 'animate-spin' : ''}`} />
+                        </Button>
+                      </div>
+                    </div>
+                    <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                      {logsText || 'No logs available.'}
+                    </pre>
+                  </CardContent>
+                )}
+              </Card>
+            </TabsContent>
+          </Tabs>
+        </main>
+      </SidebarInset>
+    </SidebarProvider>
   )
 }

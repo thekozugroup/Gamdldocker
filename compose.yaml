@@ -4,7 +4,9 @@ services:
     image: gamdl-downloader:latest
     container_name: gamdl-downloader
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - ./config:/config
       - ${MUSIC_HOST_PATH:-./downloads}:/data/music
@@ -41,7 +43,9 @@ services:
       - NODE_ENV=production
       - DOWNLOAD_CONTAINER=gamdl-downloader
       - TZ=America/New_York
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/settings').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"]
       interval: 30s
