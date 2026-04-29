@@ -32,7 +32,7 @@ services:
     container_name: gamdl-webui
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "${BIND_HOST:-0.0.0.0}:${WEBUI_PORT:-3000}:3000"
     volumes:
       - ./config:/config
       - ${MUSIC_HOST_PATH:-./downloads}:/data/music

@@ -87,6 +87,8 @@ If no playlists are configured, downloader stays alive and retries every 60s.
 
 ## Key Environment Variables
 
+- `BIND_HOST=0.0.0.0` (host interface for WebUI; set to a Tailscale IP / `127.0.0.1` to restrict)
+- `WEBUI_PORT=3000` (host port mapped to container's 3000)
 - `FREQUENCY=3600`
 - `OUTPUT_LOCATION=/data/music`
 - `PLAYLIST_M3U_DIR=/data/music/playlists`
@@ -94,6 +96,18 @@ If no playlists are configured, downloader stays alive and retries every 60s.
 - `AUTO_UPDATE=true`
 - `AUTO_UPDATE_INTERVAL=86400`
 - `TZ=America/New_York`
+
+## Restricting WebUI to a private interface
+
+By default the UI binds to `0.0.0.0:3000` (every interface). To restrict it to a private interface (e.g. Tailscale, loopback), set `BIND_HOST` in `.env`:
+
+```bash
+# Tailscale-only access
+BIND_HOST=100.x.y.z
+
+# Loopback only
+BIND_HOST=127.0.0.1
+```
 
 ## API Endpoints (WebUI)
 
