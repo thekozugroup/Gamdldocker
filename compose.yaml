@@ -17,7 +17,9 @@ services:
       - DOWNLOAD_MODE=nm3u8dlre
       - AUTO_UPDATE=true
       - AUTO_UPDATE_INTERVAL=86400
-      - AUTO_UPDATE_GAMDL=false
+      # AUTO_UPDATE_GAMDL: leave to .env (default false). Set to true to
+      # auto-bump gamdl on every AUTO_UPDATE_INTERVAL cycle.
+      - AUTO_UPDATE_GAMDL=${AUTO_UPDATE_GAMDL:-false}
       - TZ=America/New_York
     healthcheck:
       test: ["CMD", "pgrep", "-f", "entrypoint"]
