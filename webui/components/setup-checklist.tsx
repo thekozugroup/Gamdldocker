@@ -5,7 +5,7 @@ import { AlertTriangle, ArrowRight, AlertCircle } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import type { StatusSnapshot } from '@/lib/api'
-import { formatRelative } from '@/lib/format'
+import { formatCount, formatRelative } from '@/lib/format'
 
 /*
  * The "why isn't it downloading?" banner.
@@ -96,7 +96,7 @@ function firstIssue(snapshot: StatusSnapshot): Issue | null {
   if (typeof cookies.daysUntilExpiry === 'number' && cookies.daysUntilExpiry < 7) {
     return {
       title: 'Your Apple Music cookies expire soon',
-      detail: `About ${Math.max(0, cookies.daysUntilExpiry)} day(s) left. Replacing them now avoids a gap in syncing.`,
+      detail: `About ${formatCount(Math.max(0, cookies.daysUntilExpiry), 'day')} left. Replacing them now avoids a gap in syncing.`,
       severity: 'warning',
       href: '/account',
       action: 'Replace',

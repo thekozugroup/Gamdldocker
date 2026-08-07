@@ -359,11 +359,16 @@ export default function SettingsPage() {
         that only exists at the bottom means scrolling to find out whether your
         change took.
       */}
+      {/*
+        sticky inside the scroll container rather than fixed to the viewport:
+        a fixed bar spans the whole width and sits on top of the sidebar rail,
+        covering its bottom controls at any window height.
+      */}
       <div
-        className="frost frost-elevated frost-edge fixed inset-x-0 bottom-0 z-20 border-t"
+        className="frost frost-elevated frost-edge sticky bottom-0 z-20 -mx-4 border-t lg:-mx-8"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
-        <div className="mx-auto flex w-full max-w-[1100px] items-center justify-between gap-3 px-4 py-3 lg:px-8">
+        <div className="flex w-full items-center justify-between gap-3 px-4 py-3 lg:px-8">
           <p aria-live="polite" className="text-footnote text-muted-foreground">
             {dirty ? 'Unsaved changes' : 'All changes saved'}
           </p>

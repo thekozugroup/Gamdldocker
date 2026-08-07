@@ -21,6 +21,8 @@ async function timingSafeEqual(a: string, b: string): Promise<boolean> {
   return diff === 0
 }
 
+export const SESSION_COOKIE = 'gamdl_session'
+
 async function tokenAllows(request: NextRequest, token: string): Promise<boolean> {
   const header = request.headers.get('authorization') || ''
   if (header.toLowerCase().startsWith('bearer ')) {
@@ -28,7 +30,17 @@ async function tokenAllows(request: NextRequest, token: string): Promise<boolean
   }
   const query = request.nextUrl.searchParams.get('token')
   if (query !== null && (await timingSafeEqual(query, token))) return true
+  // A browser cannot attach an Authorization header to a document request, and
+  // EventSource cannot attach one at all — so without a cookie, token auth
+  // locked people out of their own UI with a JSON 401 and no way to sign in.
+  const cookie = request.cookies.get(SESSION_COOKIE)?.value
+  if (cookie && (await timingSafeEqual(cookie, token))) return true
   return false
+}
+
+function wantsHtml(request: NextRequest): boolean {
+  if (request.nextUrl.pathname.startsWith('/api/')) return false
+  return (request.headers.get('accept') || '').includes('text/html')
 }
 
 async function basicAllows(request: NextRequest, username: string, password: string): Promise<boolean> {
@@ -64,8 +76,40 @@ export async function middleware(request: NextRequest) {
 
   if (!token && !basicConfigured) return NextResponse.next()
 
-  if (token && (await tokenAllows(request, token))) return NextResponse.next()
+  const query = request.nextUrl.searchParams.get('token')
+  const tokenOk = token ? await tokenAllows(request, token) : false
+
+  if (tokenOk) {
+    // Arriving with ?token=… exchanges it for a session cookie and drops the
+    // secret out of the address bar, so it stops leaking into history,
+    // bookmarks and Referer headers.
+    if (query !== null && wantsHtml(request)) {
+      const clean = request.nextUrl.clone()
+      clean.searchParams.delete('token')
+      const response = NextResponse.redirect(clean)
+      response.cookies.set(SESSION_COOKIE, token, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: request.nextUrl.protocol === 'https:',
+        path: '/',
+        maxAge: 60 * 60 * 24 * 30,
+      })
+      return response
+    }
+    return NextResponse.next()
+  }
+
   if (basicConfigured && (await basicAllows(request, username, password))) return NextResponse.next()
+
+  // A browser asking for a page gets somewhere it can actually sign in. An API
+  // client gets a machine-readable refusal.
+  if (wantsHtml(request) && token && request.nextUrl.pathname !== '/sign-in') {
+    const signIn = request.nextUrl.clone()
+    signIn.pathname = '/sign-in'
+    signIn.search = ''
+    signIn.searchParams.set('next', request.nextUrl.pathname)
+    return NextResponse.redirect(signIn)
+  }
 
   const headers: Record<string, string> = {}
   if (basicConfigured) headers['WWW-Authenticate'] = 'Basic realm="gamdl", charset="UTF-8"'
@@ -82,5 +126,5 @@ export const config = {
   // inside the container with no credentials, so gating it would mark the
   // container unhealthy forever as soon as an operator sets WEBUI_AUTH_TOKEN.
   // It exposes nothing but heartbeat state and a version string.
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|api/health).*)'],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|icon.svg|api/health|sign-in).*)'],
 }

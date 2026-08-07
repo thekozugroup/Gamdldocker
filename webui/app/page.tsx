@@ -33,7 +33,12 @@ export default function LibraryPage() {
       const result = await api.addPlaylist(trimmed)
       setUrl('')
       toast.success(result.name ? `Added “${result.name}”` : 'Playlist added', {
-        description: 'It will sync on the next cycle — starting one now.',
+        // The route reports whether it managed to wake the downloader. Claiming
+        // a sync started when it did not is how someone ends up waiting an hour
+        // wondering why nothing happened.
+        description: result.syncRequested
+          ? 'Starting a sync now.'
+          : result.detail || 'It will sync on the next scheduled cycle.',
       })
       await refresh()
     } catch (err) {
@@ -72,6 +77,18 @@ export default function LibraryPage() {
     }
   }
 
+  const syncOne = async (target: string) => {
+    try {
+      await api.sync([target])
+      toast.success('Sync started for that playlist')
+      setTimeout(() => void refresh(), 1500)
+    } catch (err) {
+      toast.error('Could not start a sync', {
+        description: err instanceof ApiError ? err.message : undefined,
+      })
+    }
+  }
+
   const syncAll = async () => {
     setSyncing(true)
     try {
@@ -94,11 +111,15 @@ export default function LibraryPage() {
 
       <section aria-label="Library summary" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {loading ? (
-          Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="h-[88px] rounded-lg" />)
+          Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="h-[98px] rounded-lg" />)
         ) : (
           <>
             <StatTile label="Playlists" value={summary?.total ?? 0} />
-            <StatTile label="Tracks" value={summary?.songs ?? 0} />
+            <StatTile
+              label="Tracks"
+              value={playlists.reduce((sum, p) => sum + (p.availableCount ?? p.songCount ?? 0), 0)}
+              hint="on disk"
+            />
             <StatTile
               label="Syncing"
               value={summary?.running ?? 0}
@@ -207,6 +228,7 @@ export default function LibraryPage() {
                   key={playlist.url}
                   playlist={playlist}
                   onRemove={(target) => void removePlaylist(target)}
+                  onSync={(target) => void syncOne(target)}
                   busy={removing === playlist.url}
                 />
               ))}

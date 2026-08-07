@@ -14,10 +14,15 @@ const RUNTIME_IMPORT = "import { NextResponse } from 'next/server'"
 const TYPE_IMPORT = "import type { NextRequest } from 'next/server'"
 
 const STUB = `const NextResponse = {
-  next: () => ({ status: 200, body: null, headers: {} }),
+  next: () => ({ status: 200, body: null, headers: {}, cookies: { set: () => {} } }),
   json: (body, init = {}) => ({ status: init.status ?? 200, body, headers: init.headers ?? {} }),
+  redirect: (url) => ({ status: 307, body: null, location: String(url), headers: {}, cookies: { set: (name, value) => { (globalThis).__setCookie = { name, value } } } }),
 }
-type NextRequest = { headers: Headers; nextUrl: URL }`
+type NextRequest = {
+  headers: Headers
+  nextUrl: URL & { clone(): URL }
+  cookies: { get(name: string): { value: string } | undefined }
+}`
 
 const source = await fsp.readFile(SOURCE, 'utf-8')
 assert.ok(source.includes(RUNTIME_IMPORT), 'middleware.ts no longer imports NextResponse as expected')
@@ -30,8 +35,22 @@ await fsp.writeFile(patched, source.replace(RUNTIME_IMPORT, STUB).replace(TYPE_I
 
 const { middleware, config } = await import(pathToFileURL(patched).href)
 
-function requestFor(url: string, headers: Record<string, string> = {}) {
-  return { headers: new Headers(headers), nextUrl: new URL(url) }
+function requestFor(
+  url: string,
+  headers: Record<string, string> = {},
+  cookies: Record<string, string> = {},
+) {
+  const parsed = new URL(url)
+  // NextURL supports clone(); a plain URL does not, and the sign-in redirect
+  // path needs it.
+  const nextUrl = Object.assign(parsed, { clone: () => Object.assign(new URL(url), { clone: () => new URL(url) }) })
+  return {
+    headers: new Headers(headers),
+    nextUrl,
+    cookies: {
+      get: (name: string) => (name in cookies ? { value: cookies[name] } : undefined),
+    },
+  }
 }
 
 function basic(credentials: string, encoding: BufferEncoding = 'utf-8'): Record<string, string> {
@@ -149,4 +168,55 @@ test('the matcher leaves /api/health public for the container healthcheck', asyn
   assert.equal(matcher.test('/settings'), true)
   assert.equal(matcher.test('/'), true)
   assert.equal(matcher.test('/_next/static/chunks/main.js'), false)
+})
+
+// --------------------------------------------------------------------------
+// Browser sign-in flow
+//
+// A browser cannot attach an Authorization header to a document request, and
+// EventSource cannot attach one at all. Without a cookie path, setting
+// WEBUI_AUTH_TOKEN made the UI unreachable from a browser.
+// --------------------------------------------------------------------------
+
+test('a valid session cookie is accepted', async () => {
+  process.env.WEBUI_AUTH_TOKEN = 'sekret'
+  const response = await middleware(requestFor('http://host/api/status', {}, { gamdl_session: 'sekret' }))
+  assert.equal(response.status, 200)
+})
+
+test('a wrong session cookie is rejected', async () => {
+  process.env.WEBUI_AUTH_TOKEN = 'sekret'
+  const response = await middleware(requestFor('http://host/api/status', {}, { gamdl_session: 'nope' }))
+  assert.equal(response.status, 401)
+})
+
+test('an unauthenticated page request is sent to the sign-in page', async () => {
+  process.env.WEBUI_AUTH_TOKEN = 'sekret'
+  const response = await middleware(requestFor('http://host/settings', { accept: 'text/html' }))
+  assert.equal(response.status, 307)
+  assert.match(response.location, /\/sign-in/)
+  assert.match(response.location, /next=%2Fsettings/)
+})
+
+test('an unauthenticated API request still gets a JSON 401, not a redirect', async () => {
+  // Redirecting fetch() to an HTML page would surface as a JSON parse error.
+  process.env.WEBUI_AUTH_TOKEN = 'sekret'
+  const response = await middleware(requestFor('http://host/api/status', { accept: 'application/json' }))
+  assert.equal(response.status, 401)
+  assert.equal(response.body.error, 'Unauthorized')
+})
+
+test('the sign-in page itself is reachable while signed out', () => {
+  const pattern = new RegExp(config.matcher[0].replace(/^\/\(/, '^/(').replace(/\)$/, ')$'))
+  assert.equal(pattern.test('/sign-in'), false)
+})
+
+test('arriving with ?token= sets a cookie and strips the secret from the URL', async () => {
+  process.env.WEBUI_AUTH_TOKEN = 'sekret'
+  const response = await middleware(
+    requestFor('http://host/?token=sekret', { accept: 'text/html' }),
+  )
+  assert.equal(response.status, 307)
+  assert.doesNotMatch(response.location, /token=/)
+  assert.deepEqual(globalThis.__setCookie, { name: 'gamdl_session', value: 'sekret' })
 })

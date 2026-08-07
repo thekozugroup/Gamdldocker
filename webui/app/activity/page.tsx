@@ -22,6 +22,10 @@ const MAX_LINES = 2000
  */
 export default function ActivityPage() {
   const [lines, setLines] = React.useState<string[]>([])
+  const [seeded, setSeeded] = React.useState(false)
+  // The route explains WHY there is no log — usually that the downloader has
+  // not started. Dropping that left a bare spinner where an answer belonged.
+  const [emptyReason, setEmptyReason] = React.useState<string | null>(null)
   const [connected, setConnected] = React.useState(false)
   const [paused, setPaused] = React.useState(false)
   const [filter, setFilter] = React.useState('')
@@ -37,10 +41,17 @@ export default function ActivityPage() {
     void api
       .logs(600)
       .then((result) => {
-        if (!cancelled) setLines(result.logs ? result.logs.split('\n') : [])
+        if (cancelled) return
+        setLines(result.logs ? result.logs.split('\n') : [])
+        setEmptyReason(result.logs ? null : result.message || null)
+        setSeeded(true)
       })
-      .catch(() => {
-        if (!cancelled) setLines(['Could not read the log file.'])
+      .catch((error) => {
+        if (cancelled) return
+        setEmptyReason(
+          error instanceof Error ? error.message : 'The log file could not be read.',
+        )
+        setSeeded(true)
       })
     return () => {
       cancelled = true
@@ -65,7 +76,8 @@ export default function ActivityPage() {
     try {
       source = new EventSource('/api/logs/stream')
       source.onopen = () => setConnected(true)
-      source.onmessage = (event) => {
+
+      const append = (event: MessageEvent) => {
         if (pausedRef.current) return
         setLines((previous) => {
           const next = [...previous, ...String(event.data).split('\n')]
@@ -74,6 +86,13 @@ export default function ActivityPage() {
           return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next
         })
       }
+
+      // The route emits named frames (`event: log`), and `onmessage` fires only
+      // for unnamed ones — so binding it alone meant the stream connected,
+      // reported "Live", and then delivered nothing for the rest of the session.
+      source.addEventListener('log', append)
+      source.addEventListener('info', append)
+      source.onmessage = append
       source.onerror = () => {
         setConnected(false)
         source?.close()
@@ -200,10 +219,28 @@ export default function ActivityPage() {
           className="h-full overflow-auto whitespace-pre-wrap break-words bg-muted/30 p-4 font-mono text-caption leading-relaxed text-muted-foreground"
         >
           {visible.length === 0 ? (
-            <span className="flex items-center gap-2">
-              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-              {filter ? 'No lines match that filter.' : 'Waiting for output…'}
-            </span>
+            filter ? (
+              // A filter matching nothing is a settled state, not a loading one.
+              <span className="flex flex-wrap items-center gap-2">
+                No lines match “{filter}”.
+                <button
+                  type="button"
+                  onClick={() => setFilter('')}
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  Clear filter
+                </button>
+              </span>
+            ) : emptyReason ? (
+              <span>{emptyReason}</span>
+            ) : seeded ? (
+              <span>Nothing logged yet. Output appears here as the downloader works.</span>
+            ) : (
+              <span className="flex items-center gap-2">
+                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                Loading…
+              </span>
+            )
           ) : (
             visible.join('\n')
           )}

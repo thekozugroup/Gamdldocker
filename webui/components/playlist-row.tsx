@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { AlertTriangle, CheckCircle2, Circle, Loader2, Trash2, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Circle, Loader2, RefreshCw, Trash2, XCircle } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -35,10 +35,12 @@ const STATUS = {
 export function PlaylistRow({
   playlist,
   onRemove,
+  onSync,
   busy,
 }: {
   playlist: Playlist
   onRemove: (url: string) => void
+  onSync: (url: string) => void
   busy?: boolean
 }) {
   const status = STATUS[playlist.status] ?? STATUS.idle
@@ -142,6 +144,26 @@ export function PlaylistRow({
         )}
       </div>
 
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onSync(playlist.url)}
+            disabled={playlist.status === 'running'}
+            className={cn(
+              'size-9 shrink-0 text-muted-foreground opacity-60 transition-opacity ease-hig',
+              'hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100',
+              '[@media(hover:none)]:opacity-100',
+            )}
+            aria-label={`Sync ${playlist.name} now`}
+          >
+            <RefreshCw className="size-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="left">Sync this playlist now</TooltipContent>
+      </Tooltip>
+
       {/*
         Removal is destructive and irreversible from the UI's point of view, so
         it asks first and names the playlist. v1 deleted on a single click of a
@@ -155,9 +177,14 @@ export function PlaylistRow({
                 variant="ghost"
                 size="icon"
                 className={cn(
-                  'size-8 shrink-0 text-muted-foreground opacity-0 transition-opacity ease-hig',
+                  // Never fully hidden: a touch device has no hover state, so
+                  // opacity-0 left the only way to remove a playlist
+                  // undiscoverable on a phone. Dimmed, then full on
+                  // hover/focus, and always solid where hover does not exist.
+                  'size-9 shrink-0 text-muted-foreground opacity-60 transition-opacity ease-hig',
                   'hover:bg-destructive/10 hover:text-destructive',
                   'focus-visible:opacity-100 group-hover:opacity-100',
+                  '[@media(hover:none)]:opacity-100',
                 )}
                 aria-label={`Remove ${playlist.name}`}
               >

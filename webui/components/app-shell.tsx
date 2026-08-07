@@ -51,13 +51,22 @@ export function AppShell({
     item.href === '/' ? pathname === '/' : pathname.startsWith(item.href),
   )
 
+  // The handler accepts metaKey OR ctrlKey, so ⌘B was wrong on the two
+  // platforms where Ctrl is the only one that works. Resolved after mount to
+  // keep the server and client markup identical.
+  const [shortcut, setShortcut] = React.useState('Ctrl+B')
+  React.useEffect(() => {
+    const apple = /mac|iphone|ipad|ipod/i.test(navigator.platform || navigator.userAgent)
+    setShortcut(apple ? '⌘B' : 'Ctrl+B')
+  }, [])
+
   return (
     <SidebarProvider defaultOpen={defaultSidebarOpen}>
       {/*
         collapsible="icon" is the point of the whole layout: collapsing leaves a
         labelled icon rail rather than removing navigation from the screen.
       */}
-      <Sidebar collapsible="icon" className="frost frost-edge border-r">
+      <Sidebar collapsible="icon" className="frost border-r">
         <SidebarHeader className="h-14 justify-center px-2">
           <div className="flex items-center gap-2 px-1">
             <span
@@ -128,7 +137,7 @@ export function AppShell({
               <SidebarTrigger className="-ml-1" />
             </TooltipTrigger>
             <TooltipContent side="bottom">
-              Toggle sidebar <kbd className="ml-1 opacity-70">⌘B</kbd>
+              Toggle sidebar <kbd className="ml-1 opacity-70">{shortcut}</kbd>
             </TooltipContent>
           </Tooltip>
 
