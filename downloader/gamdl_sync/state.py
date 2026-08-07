@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -133,8 +134,17 @@ DEFAULT_FILE_MODE = 0o644
 PRIVATE_FILE_MODE = 0o600
 
 
-def atomic_write_text(path: Path | str, text: str, *, mode: int | None = None) -> None:
-    """Write ``text`` so that readers only ever observe a complete file."""
+def atomic_write_text(
+    path: Path | str, text: str, *, mode: int | None = None, durable: bool = True
+) -> None:
+    """Write ``text`` so that readers only ever observe a complete file.
+
+    ``durable=False`` skips the two fsyncs. The rename is still atomic, so a
+    reader never sees a torn file — only the guarantee that the data survives a
+    power cut is given up. That is the right trade for pure telemetry like a
+    progress tick, where an fsync costs 3-30ms on the SD cards and virtiofs
+    mounts these stacks actually run on.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
@@ -143,19 +153,23 @@ def atomic_write_text(path: Path | str, text: str, *, mode: int | None = None) -
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
             handle.flush()
-            os.fsync(handle.fileno())
+            if durable:
+                os.fsync(handle.fileno())
         tmp.chmod(DEFAULT_FILE_MODE if mode is None else mode)
         tmp.replace(path)
-        _fsync_dir(path.parent)
+        if durable:
+            _fsync_dir(path.parent)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
 
 
-def atomic_write_json(path: Path | str, data: Any, *, mode: int | None = None) -> None:
+def atomic_write_json(
+    path: Path | str, data: Any, *, mode: int | None = None, durable: bool = True
+) -> None:
     """Atomically write ``data`` as pretty-printed UTF-8 JSON."""
     text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    atomic_write_text(path, text, mode=mode)
+    atomic_write_text(path, text, mode=mode, durable=durable)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -191,12 +205,14 @@ class StatusStore:
 
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
+        self._progress_lock = threading.Lock()
+        self._last_progress: dict[str, tuple[int, int, float]] = {}
 
     def read(self) -> dict[str, dict]:
         data = read_json(self.path, {})
         return data if isinstance(data, dict) else {}
 
-    def update(self, url: str, **fields: Any) -> dict:
+    def update(self, url: str, *, durable: bool = True, **fields: Any) -> dict:
         """Merge ``fields`` into the entry for ``url`` and return it."""
         with FileLock(self.path):
             data = self.read()
@@ -205,10 +221,11 @@ class StatusStore:
                 entry = {}
             entry.update({k: v for k, v in fields.items() if v is not None})
             data[url] = entry
-            atomic_write_json(self.path, data)
+            atomic_write_json(self.path, data, durable=durable)
         return entry
 
     def mark_running(self, url: str, name: str | None = None) -> None:
+        self._forget_progress(url)
         self.update(
             url,
             status="running",
@@ -248,10 +265,44 @@ class StatusStore:
             fields["failedAt"] = _utcnow()
         else:
             fields["lastDownloaded"] = _utcnow()
+        # The terminal write is always durable and never throttled.
+        self._forget_progress(url)
         self.update(url, **fields)
 
+    #: Minimum gap between progress writes for one playlist. The UI polls every
+    #: three seconds, so anything finer is written for nobody.
+    PROGRESS_MIN_INTERVAL = 1.0
+
     def set_progress(self, url: str, current: int, total: int) -> None:
-        self.update(url, progress={"current": current, "total": total})
+        """Publish a progress tick, coalescing the ones nobody will see.
+
+        gamdl binds ``Track n/N`` onto its logger for the whole track, so every
+        line it emits while working carries the pattern — including the
+        "already exists" skip that fires for every track on a cycle where
+        nothing needs downloading. Writing on each one rewrote the entire status
+        map with two fsyncs per track: measured at 128 MB and 10,000 fsyncs per
+        cycle for a 5,000-track library that downloaded nothing. Worse, it
+        happened inline on the thread draining gamdl's stdout, so on slow
+        storage it stalled the download itself.
+        """
+        now = time.monotonic()
+        with self._progress_lock:
+            previous = self._last_progress.get(url)
+            if previous is not None:
+                last_current, last_total, last_time = previous
+                unchanged = last_current == current and last_total == total
+                if unchanged or (now - last_time) < self.PROGRESS_MIN_INTERVAL:
+                    return
+            self._last_progress[url] = (current, total, now)
+
+        # Not durable: a progress tick is telemetry. The rename is still atomic,
+        # so a reader never sees a torn file; only "survives a power cut" is
+        # given up, and nobody needs a stale percentage to survive one.
+        self.update(url, durable=False, progress={"current": current, "total": total})
+
+    def _forget_progress(self, url: str) -> None:
+        with self._progress_lock:
+            self._last_progress.pop(url, None)
 
     def reset_to_idle(self, urls: list[str]) -> None:
         """Mark the given URLs idle and forget everything else.

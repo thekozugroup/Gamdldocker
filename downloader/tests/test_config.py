@@ -258,3 +258,51 @@ def test_to_json_round_trips(tmp_path: Path):
     assert reloaded.frequency == 900
     assert reloaded.song_codec == "alac"
     assert reloaded.safe_filenames is True
+
+
+# --------------------------------------------------------------------------- #
+# Migration must not freeze the environment into the file
+# --------------------------------------------------------------------------- #
+
+
+def test_migration_does_not_bake_env_values_into_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # settings.json outranks the environment at load time, so writing env values
+    # here would silently kill every documented .env knob from upgrade day on.
+    monkeypatch.setenv("FREQUENCY", "900")
+    monkeypatch.setenv("SAFE_FILENAMES", "true")
+    path = write(tmp_path / "s.json", V1_SETTINGS)
+    migrate_settings_file(path)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["frequency"] == 3600  # the v1 file's own value, not the env's
+    assert "safeFilenames" not in data  # never set by the user, so never written
+
+
+def test_env_still_applies_after_migration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    path = write(tmp_path / "s.json", V1_SETTINGS)
+    migrate_settings_file(path)
+    monkeypatch.setenv("SAFE_FILENAMES", "true")
+    monkeypatch.setenv("DOWNLOAD_MODE", "ytdlp")
+    settings = load_settings(path)
+    assert settings.safe_filenames is True
+    assert settings.download_mode == "nm3u8dlre"  # the file set this one, so it wins
+
+
+def test_migration_writes_only_what_the_v1_file_carried(tmp_path: Path):
+    path = write(tmp_path / "s.json", {"frequency": 1800, "quality": "lossless"})
+    migrate_settings_file(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["frequency"] == 1800
+    assert data["songCodec"] == "alac"  # translated from the deprecated key
+    assert "coverSize" not in data  # a default the user never expressed
+    assert "quality" not in data
+
+
+def test_migrated_deprecated_keys_still_translate(tmp_path: Path):
+    path = write(tmp_path / "s.json", {"outputStructure": "{artist}/{album}/{title}"})
+    migrate_settings_file(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["albumFolderTemplate"] == "{album_artist}/{album}"
+    assert data["singleDiscFileTemplate"] == "{track:02d} {title}"

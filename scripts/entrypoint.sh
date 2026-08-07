@@ -43,6 +43,15 @@ if [ -n "${PUID:-}" ] || [ -n "${PGID:-}" ]; then
         chown -R "$TARGET_UID:$TARGET_GID" "$CONFIG_DIR" 2>/dev/null || true
         chown "$TARGET_UID:$TARGET_GID" "$OUTPUT_DIR" "$TEMP_PATH" 2>/dev/null || true
 
+        # The virtualenv and the N_m3u8DL-RE binary too, or self-update breaks:
+        # pip cannot write to a root-owned /opt/venv as an unprivileged user, so
+        # the documented fix for root-owned files would silently disable the
+        # documented auto-update, and nothing would say why.
+        chown -R "$TARGET_UID:$TARGET_GID" "${VIRTUAL_ENV:-/opt/venv}" 2>/dev/null || true
+        chown "$TARGET_UID:$TARGET_GID" \
+            "${NM3U8DLRE_PATH:-/usr/local/bin/N_m3u8DL-RE}" \
+            "$(dirname "${NM3U8DLRE_PATH:-/usr/local/bin/N_m3u8DL-RE}")" 2>/dev/null || true
+
         echo "Running as UID ${TARGET_UID}, GID ${TARGET_GID}"
         exec gosu "$TARGET_UID:$TARGET_GID" python -m gamdl_sync --config-dir "$CONFIG_DIR" run
     else

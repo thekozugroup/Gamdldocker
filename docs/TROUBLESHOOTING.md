@@ -83,6 +83,11 @@ of them a different name in `config/playlist-overrides.json`.
 `.env` to your own IDs (`id -u`, `id -g`) and recreate the containers. Set them
 for **both** services — they share `/config` and must agree on a user.
 
+Recreate rather than restart: the entrypoint adjusts ownership of the config
+volume *and* the Python environment on start, and the latter is what keeps
+self-update working. If you see "cannot update gamdl: /opt/venv is not writable"
+in the log, the container was started before this was in place — recreate it.
+
 ```bash
 docker compose down && docker compose up -d
 sudo chown -R $(id -u):$(id -g) ./config ./downloads
@@ -114,9 +119,32 @@ cat config/.downloader-heartbeat
 `/api/health` is deliberately outside the auth check for exactly this reason. If
 it happens, confirm you are on a current image (`docker compose build --no-cache webui`).
 
-**`docker compose up` fails fetching N_m3u8DL-RE.** Your network blocks GitHub.
-Keep the default `NM3U8DLRE_VERSION=pinned`, which installs a known-good release
-by direct download and never touches the GitHub API.
+### Builds behind a restricted network
+
+**`docker compose up` fails fetching N_m3u8DL-RE.** There are two different
+causes, and only one of them the default handles.
+
+If your network blocks the GitHub *API* (`api.github.com`), the default
+`NM3U8DLRE_VERSION=pinned` is already the fix — it downloads a known-good
+release directly and never calls the API. Only `NM3U8DLRE_VERSION=latest` needs
+the API.
+
+If `github.com` itself is blocked, no build-time setting helps: the release
+tarball has to come from somewhere. Fetch it on a machine that can reach GitHub,
+serve it from anywhere the build can see, and point the build at it:
+
+```bash
+# On a machine with access
+curl -fLO https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.2.1/N_m3u8DL-RE_v0.2.1_linux-x64_20240828.tar.gz
+
+# Then, from a host the build can reach
+NM3U8DLRE_URL=http://your-mirror/N_m3u8DL-RE_v0.2.1_linux-x64_20240828.tar.gz \
+  docker compose build gamdl-downloader
+```
+
+`NM3U8DLRE_URL` overrides the download location entirely. Failing that, set
+`DOWNLOAD_MODE=ytdlp` — yt-dlp ships with gamdl, so the image needs no external
+binary at all, at some cost in download speed.
 
 **Builds fail with a TLS or certificate error.** A corporate proxy is
 intercepting the build. Configure Docker's build proxy settings rather than

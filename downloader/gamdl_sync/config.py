@@ -430,6 +430,12 @@ def migrate_settings_file(settings_path: Path | str) -> bool:
     Runs once at startup. Values are preserved through the same translation the
     loader uses, so nothing a user configured is silently lost — the keys just
     stop describing capabilities the downloader never had.
+
+    Deliberately built from defaults + the file, with **no environment overlay**.
+    settings.json outranks the environment at load time, so folding the env in
+    here would bake whatever was set on upgrade day into the file as literal
+    keys — and every ``.env`` knob the README documents would quietly stop
+    having any effect from that moment on.
     """
     path = Path(settings_path)
     data = read_json(path, None)
@@ -440,7 +446,30 @@ def migrate_settings_file(settings_path: Path | str) -> bool:
     ):
         return False
 
-    migrated = _from_json(_from_env(Settings()), data).to_json()
+    translated = _from_json(Settings(), data).to_json()
+
+    # Only keys the v1 file actually carried, plus the ones its deprecated keys
+    # translate into. Writing the full document would freeze every default too,
+    # with the same consequence.
+    produced_by = {
+        "quality": ("songCodec",),
+        "fileFormat": ("songCodec",),
+        "outputStructure": (
+            "albumFolderTemplate",
+            "singleDiscFileTemplate",
+            "multiDiscFileTemplate",
+            "noAlbumFileTemplate",
+        ),
+    }
+    wanted = {"schemaVersion"}
+    for key in data:
+        if key in DEPRECATED_KEYS:
+            wanted.update(produced_by.get(key, ()))
+        elif key in translated:
+            wanted.add(key)
+
+    migrated = {key: value for key, value in translated.items() if key in wanted}
+
     # Keep any unrecognised keys; a future version may know what they mean.
     for key, value in data.items():
         if key not in migrated and key not in DEPRECATED_KEYS and key != "schemaVersion":

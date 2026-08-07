@@ -36,13 +36,6 @@ RUN if [ -n "$GAMDL_VERSION" ]; then \
     && pip install --no-cache-dir mutagen \
     && gamdl --version
 
-COPY downloader/pyproject.toml /src/downloader/
-COPY downloader/gamdl_sync /src/downloader/gamdl_sync
-RUN pip install --no-cache-dir --no-deps /src/downloader
-
-# Record what shipped, so the runtime updater knows what to roll back to.
-RUN gamdl --version > /opt/gamdl-baseline 2>&1 || echo "unknown" > /opt/gamdl-baseline
-
 # N_m3u8DL-RE.
 #
 # Pinned by default so the build is reproducible and does not depend on the
@@ -56,6 +49,9 @@ RUN gamdl --version > /opt/gamdl-baseline 2>&1 || echo "unknown" > /opt/gamdl-ba
 # `|| true` here, which shipped images that started cleanly and then failed every
 # single download.
 ARG NM3U8DLRE_VERSION=pinned
+# For networks where github.com is unreachable entirely: point this at any
+# mirror serving the release tarball and the version logic is bypassed.
+ARG NM3U8DLRE_URL=""
 RUN set -eu; \
     arch="$(uname -m)"; \
     case "$arch" in \
@@ -67,7 +63,9 @@ RUN set -eu; \
             pinned='https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.2.2/N_m3u8DL-RE_v0.2.2_linux-arm64.tar.gz' ;; \
         *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
-    if [ "$NM3U8DLRE_VERSION" = "latest" ]; then \
+    if [ -n "$NM3U8DLRE_URL" ]; then \
+        url="$NM3U8DLRE_URL"; \
+    elif [ "$NM3U8DLRE_VERSION" = "latest" ]; then \
         url="$(curl -fsSL --retry 3 --retry-delay 2 --max-time 60 \
                https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest \
                | grep -Eo 'https://[^"]+\.tar\.gz' | grep -F "$pattern" | head -n1)"; \
@@ -90,6 +88,15 @@ RUN set -eu; \
       || DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 /opt/N_m3u8DL-RE --help >/dev/null 2>&1 \
       || { echo "the downloaded N_m3u8DL-RE does not run" >&2; exit 1; }
 
+# Our own source goes last: it changes on every commit, and everything above
+# it should survive that.
+COPY downloader/pyproject.toml /src/downloader/
+COPY downloader/gamdl_sync /src/downloader/gamdl_sync
+RUN pip install --no-cache-dir --no-deps /src/downloader
+
+# Record what shipped, so the runtime updater knows what to roll back to.
+RUN gamdl --version > /opt/gamdl-baseline 2>&1 || echo "unknown" > /opt/gamdl-baseline
+
 # --------------------------------------------------------------------------- #
 # Stage 2 — runtime
 # --------------------------------------------------------------------------- #
@@ -108,7 +115,24 @@ RUN apt-get update \
         gosu \
         procps \
         tini \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # Debian's ffmpeg hard-depends on the Mesa stack, which drags in LLVM, a
+    # software rasteriser and a theorem prover — 191 MB of GPU machinery in an
+    # image that only ever touches audio. `--no-install-recommends` cannot drop
+    # them because they are real dependencies, and ffmpeg does not link any of
+    # them (verified with ldd). Removing the files was checked against the three
+    # operations gamdl actually performs — AAC encode, remux, and stream copy —
+    # all of which produce byte-identical output afterwards.
+    && rm -f /usr/lib/*/libLLVM*.so* \
+             /usr/lib/*/libgallium*.so* \
+             /usr/lib/*/libz3.so* \
+    && rm -rf /usr/lib/*/dri /usr/lib/*/gallium-pipe \
+    # Prove it still works, so a future base-image change cannot ship a broken
+    # ffmpeg silently.
+    && ffmpeg -loglevel error -f lavfi -i "sine=frequency=440:duration=1" \
+              -c:a aac -f mp4 /tmp/ffmpeg-check.m4a -y \
+    && ffmpeg -loglevel error -i /tmp/ffmpeg-check.m4a -c copy -f mp4 /tmp/ffmpeg-copy.m4a -y \
+    && rm -f /tmp/ffmpeg-check.m4a /tmp/ffmpeg-copy.m4a
 
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/N_m3u8DL-RE /usr/local/bin/N_m3u8DL-RE

@@ -89,7 +89,25 @@ storage.
 
 ## Rolling back
 
-v2 only adds keys to `settings.json` and only adds files to `config/`, so
-checking out a v1 tag and rebuilding works. The one thing v1 will not
-understand is the `.m3u8` playlist files; it will write fresh `.m3u` files
-alongside them on its next cycle. Delete the `.m3u8` files if you go back.
+Checking out a v1 tag and rebuilding works, with two things to put back by hand.
+
+**`settings.json` loses four keys.** The migration translates `quality`,
+`fileFormat`, `savePlaylist` and `outputStructure` into their v2 equivalents and
+then removes them, because v2's loader does not read them. v1 does, so after
+rolling back you need to re-add whichever of them you had set. Keep a copy
+before upgrading if that matters to you:
+
+```bash
+cp config/settings.json config/settings.json.v1-backup
+```
+
+Everything else in the file is preserved, including keys neither version
+recognises.
+
+**`.m3u8` playlist files mean nothing to v1.** It will write fresh bare-path
+`.m3u` files alongside them on its next cycle. Delete the `.m3u8` files if you
+go back, or your music server will show every playlist twice.
+
+Nothing else is destructive: v2 only adds files to `config/` (`logs/`,
+`control/`, `.tag-cache.json`, and the dotfiles that track migrations and
+heartbeats), and v1 ignores all of them.

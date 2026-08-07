@@ -147,8 +147,24 @@ class Updater:
             check=False,
         )
 
+    def _venv_writable(self) -> bool:
+        """Can we actually install into the environment we are running from?"""
+        target = Path(sys.prefix) / "lib"
+        return os.access(target if target.exists() else Path(sys.prefix), os.W_OK)
+
     def _update_gamdl(self, outcome: UpdateOutcome) -> None:
         previous = outcome.gamdl_before
+
+        if not self._venv_writable():
+            # Silent failure here is how someone ends up months behind on a tool
+            # that stops working when Apple changes its web player.
+            outcome.errors.append(
+                f"cannot update gamdl: {sys.prefix} is not writable by uid {os.getuid()}. "
+                "If you set PUID/PGID, recreate the container so the entrypoint can "
+                "adjust ownership, or set AUTO_UPDATE_GAMDL=false to stop trying."
+            )
+            outcome.gamdl_after = previous
+            return
         try:
             result = self._pip("--upgrade", "gamdl")
         except subprocess.TimeoutExpired:

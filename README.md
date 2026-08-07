@@ -180,7 +180,8 @@ docker compose exec gamdl-downloader gamdl-sync doctor
 | Playlist file has fewer tracks than Apple shows | Some tracks are unavailable in your storefront | Expected. The count is shown as "missing" in the UI |
 | Downloader keeps restarting | Look at the actual error | **Activity** tab, or `docker compose logs gamdl-downloader` |
 | UI loads but shows "downloader not responding" | Downloader container is down | `docker compose ps`, then check its logs |
-| Build fails fetching N_m3u8DL-RE | Network blocks GitHub | Keep `NM3U8DLRE_VERSION=pinned` (the default) |
+| Build fails fetching N_m3u8DL-RE | Network blocks the GitHub **API** | Keep `NM3U8DLRE_VERSION=pinned` (the default) — it downloads a release directly and never calls the API |
+| Build fails fetching N_m3u8DL-RE | Network blocks github.com entirely | See [troubleshooting](docs/TROUBLESHOOTING.md#builds-behind-a-restricted-network) |
 
 Logs are at `config/logs/downloader.log` on the host, and in the **Activity**
 tab, which streams them live. Credentials are redacted before anything is

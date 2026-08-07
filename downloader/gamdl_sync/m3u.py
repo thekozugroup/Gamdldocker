@@ -22,6 +22,10 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .tagcache import TagCache
 
 log = logging.getLogger(__name__)
 
@@ -75,23 +79,27 @@ def read_entries(playlist_path: Path, base_dir: Path | None = None) -> list[str]
     return out
 
 
-def _resolve(raw_line: str, m3u_dir: Path, output_root: Path) -> Path:
-    """Resolve a playlist line to an absolute path.
+def _resolve(raw_line: str, m3u_dir: Path, output_root: Path) -> tuple[Path, bool]:
+    """Resolve a playlist line to an absolute path, and say whether it exists.
 
     gamdl emits paths relative to the m3u's own directory. We fall back to the
     library root because a file hand-edited by the user, or produced by an older
     version of this project, may be relative to that instead.
+
+    The existence answer is returned rather than discarded: the caller used to
+    re-stat the path it had just been handed, doubling the syscall count over a
+    whole library for no new information.
     """
     candidate = Path(raw_line)
     if candidate.is_absolute():
-        return candidate
+        return candidate, candidate.exists()
     from_m3u = (m3u_dir / candidate).resolve(strict=False)
     if from_m3u.exists():
-        return from_m3u
+        return from_m3u, True
     from_root = (output_root / candidate).resolve(strict=False)
     if from_root.exists():
-        return from_root
-    return from_m3u
+        return from_root, True
+    return from_m3u, False
 
 
 def _relative_to(target: Path, start: Path) -> str:
@@ -140,6 +148,29 @@ def _read_tags(path: Path) -> tuple[int, str, str]:
     return duration, first("title"), first("artist")
 
 
+def _tags_for(path: Path, cache: TagCache | None) -> tuple[int, str, str]:
+    """Tags for ``path``, from the cache when the file has not changed.
+
+    Keying on size and mtime means replacing a file with a better rip is picked
+    up on the next cycle, while an untouched library costs one stat per track
+    instead of a full metadata parse.
+    """
+    if cache is None:
+        return _read_tags(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return _read_tags(path)
+
+    hit = cache.get(path, stat.st_size, stat.st_mtime_ns)
+    if hit is not None:
+        return hit
+
+    tags = _read_tags(path)
+    cache.put(path, stat.st_size, stat.st_mtime_ns, tags)
+    return tags
+
+
 def repair_playlist(
     source: Path,
     *,
@@ -149,6 +180,7 @@ def repair_playlist(
     prune_missing: bool = True,
     read_tags: bool = True,
     source_dir: Path | None = None,
+    tag_cache: TagCache | None = None,
 ) -> RepairResult:
     """Turn gamdl's raw output into a well-formed, current ``.m3u8``.
 
@@ -166,15 +198,14 @@ def repair_playlist(
     entries: list[PlaylistEntry] = []
     seen: set[str] = set()
     for raw in raw_lines:
-        absolute = _resolve(raw, resolve_base, output_root)
+        absolute, exists = _resolve(raw, resolve_base, output_root)
         key = str(absolute)
         if key in seen:
             continue
         seen.add(key)
-        exists = absolute.exists()
         duration, tag_title, tag_artist = (-1, "", "")
         if exists and read_tags:
-            duration, tag_title, tag_artist = _read_tags(absolute)
+            duration, tag_title, tag_artist = _tags_for(absolute, tag_cache)
         entries.append(
             PlaylistEntry(
                 relative_path=_relative_to(absolute, m3u_dir),

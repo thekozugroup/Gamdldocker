@@ -1,11 +1,14 @@
 name: gamdl Watch
 
 # gamdl's own releases are what actually keeps this stack downloading — Apple
-# changes its web player often enough that a stale pin quietly stops working.
-# This workflow is the "somebody should notice" half of that: it never changes
-# what a release actually ships (the root Dockerfile's GAMDL_VERSION build arg
-# still decides that), it only tells a human a new release exists and proves,
-# with a real build, that adopting it wouldn't immediately break.
+# changes its web player often enough that a stale version quietly stops
+# working.
+#
+# Images already take whatever gamdl is current at build time (GAMDL_VERSION
+# defaults to empty), and running containers update themselves. So this workflow
+# changes nothing: it is an early-warning system. It builds the image against
+# each new release and runs it, so that if a release WOULD break the stack a
+# human hears about it here rather than from a user whose downloads stopped.
 
 on:
   schedule:
@@ -137,9 +140,13 @@ jobs:
               `- Previously recorded in this repo: \`${RECORDED || "(none)"}\``,
               `- ${smokeLine}`,
               "",
-              "Bump `GAMDL_VERSION` in the root `Dockerfile` when you're ready to adopt it, " +
-              "then close this issue — the next scheduled check reopens/comments on a new one " +
-              "once another release ships.",
+              "No action is needed to adopt it: images build against the current gamdl " +
+              "and running containers update themselves. If the smoke test above FAILED, " +
+              "pin the last good version with `GAMDL_VERSION` in `.env` and set " +
+              "`AUTO_UPDATE_GAMDL=false` until it is sorted out.",
+              "",
+              "Close this issue once you have looked — the next check opens a new one when " +
+              "another release ships.",
               "",
               `_Checked ${new Date().toISOString()} by [gamdl-watch](${runUrl})._`,
             ].join("\n");

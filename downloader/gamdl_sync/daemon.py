@@ -31,7 +31,7 @@ from .compat import apply_compat_patches
 from .config import Settings, load_settings, migrate_settings_file
 from .control import CANCEL, RELOAD, SYNC_NOW, ControlChannel
 from .gamdl_runner import GamdlCapabilities, build_args, probe_capabilities, run_gamdl
-from .m3u import repair_playlist
+from .m3u import read_entries, repair_playlist
 from .migrations import run_migrations
 from .naming import (
     predict_gamdl_name,
@@ -47,6 +47,7 @@ from .state import (
     read_json,
     write_heartbeat,
 )
+from .tagcache import TagCache
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +108,10 @@ class Paths:
     def logs(self) -> Path:
         return self.config_dir / "logs"
 
+    @property
+    def tag_cache(self) -> Path:
+        return self.config_dir / ".tag-cache.json"
+
 
 @dataclass
 class SyncOutcome:
@@ -128,6 +133,7 @@ class Daemon:
         self.status = StatusStore(self.paths.status)
         self.names = NameCache(self.paths.name_cache)
         self.control = ControlChannel(self.paths.control)
+        self.tags = TagCache(self.paths.tag_cache)
         self.caps: GamdlCapabilities = GamdlCapabilities.permissive()
         self.cycle = 0
         self._scoped_urls: list[str] = []
@@ -327,7 +333,25 @@ class Daemon:
                 self._sync_guarded(settings, url, name, _title)
 
         self._sweep_orphans(settings, [name for _, name, _ in plan])
+        self._persist_tag_cache(m3u_dir, [name for _, name, _ in plan])
         log.info("cycle %d finished in %.1fs", self.cycle, time.monotonic() - started)
+
+    def _persist_tag_cache(self, m3u_dir: Path, names: list[str]) -> None:
+        """Save the tag cache, keeping only tracks a playlist still references.
+
+        Pruning against what the published playlists actually contain is what
+        stops the cache growing without bound as a library churns.
+        """
+        referenced: set[str] = set()
+        for name in names:
+            path = m3u_dir / f"{name}.m3u8"
+            for line in read_entries(path, m3u_dir):
+                referenced.add(str((m3u_dir / line).resolve(strict=False)))
+        try:
+            self.tags.prune(referenced)
+            self.tags.save()
+        except Exception as exc:
+            log.debug("tag cache not saved: %s", exc)
 
     def _sync_guarded(self, settings: Settings, url: str, name: str, title: str = "") -> None:
         if self.stop_event.is_set() or self.cancel_event.is_set():
@@ -435,6 +459,7 @@ class Daemon:
             title=title or name,
             prune_missing=settings.prune_playlist_entries,
             source_dir=produced.parent,
+            tag_cache=self.tags,
         )
 
         # A run that died partway leaves a partial file. Publishing it would

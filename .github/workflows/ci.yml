@@ -115,7 +115,7 @@ jobs:
       # bash default — otherwise it would flag constructs that are perfectly
       # valid POSIX sh.
       - name: shellcheck scripts/*.sh webui/*.sh
-        run: shellcheck --shell=sh --severity=style scripts/*.sh
+        run: shellcheck --shell=sh --severity=style scripts/*.sh webui/*.sh
 
   docker:
     name: Docker build (${{ matrix.image }}, smoke test)
@@ -142,6 +142,36 @@ jobs:
           file: ${{ matrix.file }}
           platforms: linux/amd64
           push: false
+          # Without load the image stays in the buildx cache and cannot be run,
+          # which is what made the "smoke test" a compile check.
+          load: true
           tags: ${{ matrix.image }}:ci
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Start the image and check it actually works
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.image }}" = "gamdl-downloader" ]; then
+            docker run --rm "${{ matrix.image }}:ci" gamdl --version
+            docker run --rm "${{ matrix.image }}:ci" ffmpeg -version | head -1
+            # doctor exits non-zero without cookies, which is correct — we only
+            # care that the daemon's own code paths import and run.
+            docker run --rm "${{ matrix.image }}:ci" \
+              python -m gamdl_sync --config-dir /config show-config > /dev/null
+            echo "downloader image starts and its tools run"
+          else
+            id="$(docker run -d -p 3000:3000 "${{ matrix.image }}:ci")"
+            for _ in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:3000/api/health > /dev/null 2>&1; then
+                echo "webui image serves /api/health"
+                docker rm -f "$id" > /dev/null
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "webui image never became healthy" >&2
+            docker logs "$id" | tail -40
+            docker rm -f "$id" > /dev/null
+            exit 1
+          fi

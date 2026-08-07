@@ -64,6 +64,9 @@ services:
         # "pinned" uses a known-good release without contacting the GitHub API.
         # "latest" resolves the newest release during the build.
         NM3U8DLRE_VERSION: ${NM3U8DLRE_VERSION:-pinned}
+        # For networks that cannot reach github.com at all — see
+        # docs/TROUBLESHOOTING.md. Empty means "use NM3U8DLRE_VERSION".
+        NM3U8DLRE_URL: ${NM3U8DLRE_URL:-}
     image: gamdl-downloader:latest
     container_name: gamdl-downloader
     restart: unless-stopped
