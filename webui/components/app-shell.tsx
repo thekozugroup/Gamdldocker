@@ -140,13 +140,17 @@ export function AppShell({
           </p>
         </header>
 
-        <main
+        {/*
+          A div, not a <main>: SidebarInset already renders one, and two main
+          landmarks make screen-reader landmark navigation ambiguous.
+        */}
+        <div
           id="content"
           className="mx-auto w-full max-w-[1100px] flex-1 px-4 py-6 lg:px-8 lg:py-8"
           style={{ paddingBottom: 'calc(2rem + env(safe-area-inset-bottom))' }}
         >
           {children}
-        </main>
+        </div>
       </SidebarInset>
     </SidebarProvider>
   )

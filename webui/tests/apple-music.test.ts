@@ -1,6 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { canonicalKey, extractSlugName, isPlaylistUrl, normalizeUrl } from '../lib/apple-music.ts'
+import {
+  canonicalKey,
+  extractSlugName,
+  fetchPlaylistMetadata,
+  isPlaylistUrl,
+  normalizeUrl,
+} from '../lib/apple-music.ts'
 
 const PL = 'pl.u-2aoq8mDCLqmqK1'
 const CATALOG = 'pl.f4d106fed2bd41149aaacabb233eb5eb'
@@ -90,4 +96,67 @@ test('extractSlugName leaves Unicode slugs intact', () => {
 test('extractSlugName falls back to "playlist"', () => {
   assert.equal(extractSlugName('https://music.apple.com/us/browse'), 'playlist')
   assert.equal(extractSlugName(''), 'playlist')
+})
+
+/**
+ * Drives the real fetchPlaylistMetadata with a stubbed response, so the parsing
+ * under test is the parsing that ships.
+ */
+async function titleFrom(html: string): Promise<string | undefined> {
+  const original = globalThis.fetch
+  globalThis.fetch = (async () =>
+    new Response(html, { status: 200, headers: { 'content-type': 'text/html' } })) as typeof fetch
+  try {
+    const meta = await fetchPlaylistMetadata('https://music.apple.com/us/playlist/x/pl.u-AAA')
+    return meta.name
+  } finally {
+    globalThis.fetch = original
+  }
+}
+
+// --------------------------------------------------------------------------
+// Title extraction — the value here becomes the on-disk filename
+// --------------------------------------------------------------------------
+
+test('an apostrophe in the title is not a truncation point', async () => {
+  // `content=["']([^"']+)["']` captured just "Today". Apostrophes are common
+  // enough in playlist names that this shipped as a silent rename.
+  const html = `<meta property="og:title" content="Today's Hits on Apple Music">`
+  assert.equal(await titleFrom(html), "Today's Hits")
+})
+
+test('named entities are decoded', async () => {
+  const html = `<meta property="og:title" content="Rock &amp; Roll on Apple Music">`
+  assert.equal(await titleFrom(html), 'Rock & Roll')
+})
+
+test('numeric entities are decoded', async () => {
+  const html = `<meta property="og:title" content="90&#39;s Classics on Apple Music">`
+  assert.equal(await titleFrom(html), "90's Classics")
+})
+
+test('hex entities are decoded, including emoji', async () => {
+  const html = `<meta property="og:title" content="&#x1F3B5; Mix on Apple Music">`
+  assert.equal(await titleFrom(html), '🎵 Mix')
+})
+
+test('a double-encoded entity decodes exactly once', async () => {
+  // &amp;#39; must yield the literal text "&#39;", not an apostrophe — a second
+  // pass would let a crafted title smuggle characters past the sanitizer.
+  const html = `<meta property="og:title" content="A&amp;#39;B on Apple Music">`
+  assert.equal(await titleFrom(html), 'A&#39;B')
+})
+
+test('single-quoted content attributes still work', async () => {
+  const html = `<meta property='og:title' content='Chill "Vibes" on Apple Music'>`
+  assert.equal(await titleFrom(html), 'Chill "Vibes"')
+})
+
+test('a lone surrogate is dropped rather than emitted', async () => {
+  const html = `<meta property="og:title" content="Bad&#xD800; Mix on Apple Music">`
+  assert.equal(await titleFrom(html), 'Bad Mix')
+})
+
+test('falls back to the title tag when og:title is absent', async () => {
+  assert.equal(await titleFrom('<title>Deep Focus on Apple Music</title>'), 'Deep Focus')
 })

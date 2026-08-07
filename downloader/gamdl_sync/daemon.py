@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+from .compat import apply_compat_patches
 from .config import Settings, load_settings, migrate_settings_file
 from .control import CANCEL, RELOAD, SYNC_NOW, ControlChannel
 from .gamdl_runner import GamdlCapabilities, build_args, probe_capabilities, run_gamdl
@@ -53,6 +54,10 @@ __all__ = ["Daemon", "Paths"]
 HEARTBEAT_INTERVAL = 15.0
 CONTROL_POLL_INTERVAL = 1.0
 EMPTY_RETRY_SECONDS = 60
+
+#: Where gamdl is told to write playlist files, relative to the library root.
+#: Deliberately not the published playlist directory — see sync_one.
+STAGING_DIRNAME = ".gamdl-staging"
 
 
 @dataclass(frozen=True)
@@ -128,6 +133,10 @@ class Daemon:
         self._last_heartbeat = 0.0
         self._state = "starting"
         self._detail = ""
+        self._state_since = time.monotonic()
+        #: Lowercased filenames claimed by the current plan. Read by
+        #: _drop_previous_file so cleanup cannot delete a sibling's file.
+        self._claimed_names: set[str] = set()
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -150,9 +159,11 @@ class Daemon:
     def _heartbeat_loop(self) -> None:
         """Publish liveness on a fixed cadence, independent of the sync loop.
 
-        Tying the heartbeat to the loop's own progress meant an hour-long
-        download, or a slow update check on a blocked network, looked identical
-        to a wedged process.
+        Tying the heartbeat *write* to the loop's own progress meant an hour-long
+        download looked identical to a wedged process. But a thread that only
+        republishes a timestamp would report health forever while the sync thread
+        is stuck, so the record also carries when the daemon last actually
+        changed what it was doing. The healthcheck reads that, not the write time.
         """
         while not self.stop_event.wait(HEARTBEAT_INTERVAL):
             write_heartbeat(
@@ -160,6 +171,7 @@ class Daemon:
                 state=self._state,
                 cycle=self.cycle,
                 detail=self._detail,
+                stalled_for=time.monotonic() - self._state_since,
             )
 
     def run(self) -> int:
@@ -170,6 +182,7 @@ class Daemon:
         heartbeat.start()
         run_migrations(self.paths)
         migrate_settings_file(self.paths.settings)
+        apply_compat_patches()
 
         self.caps = probe_capabilities()
         if not self.caps.flags:
@@ -206,7 +219,13 @@ class Daemon:
                 continue
 
             self.cancel_event.clear()
-            self._run_cycle(settings, configured, targets)
+            try:
+                self._run_cycle(settings, configured, targets)
+            except Exception:
+                # Housekeeping runs outside any per-playlist guard, so an ENOSPC
+                # on /config or a transient volume error used to propagate out of
+                # run() and end the daemon. Log it and try again next cycle.
+                log.exception("cycle %d failed; retrying at the next interval", self.cycle)
 
             if self.stop_event.is_set():
                 break
@@ -247,9 +266,21 @@ class Daemon:
         overrides = self._read_overrides()
         name_cache = self.names.read()
 
-        # Seed the collision tracker from what is already on disk so a playlist
-        # keeps the same suffix across restarts instead of flapping.
-        seen: set[str] = {path.stem.casefold() for path in m3u_dir.glob("*.m3u*") if path.is_file()}
+        # Two separate sets, because they mean different things.
+        #
+        # `on_disk` is what already exists in the folder. A playlist finding its
+        # own file there is not a collision, so that entry gets cleared as it is
+        # matched — otherwise every playlist would gain a suffix on the second run.
+        #
+        # `claimed` is what playlists earlier in this plan have taken. Those are
+        # real collisions and must never be cleared. Keeping both in one set let
+        # the clear-my-own-file step erase an earlier playlist's reservation, so
+        # two playlists with the same title both resolved to the same filename
+        # and silently overwrote each other every cycle.
+        on_disk: set[str] = {
+            path.stem.casefold() for path in m3u_dir.glob("*.m3u*") if path.is_file()
+        }
+        claimed: set[str] = set()
 
         # Names are resolved for every configured playlist even on a scoped run:
         # the collision suffixes depend on the whole set, and the orphan sweep
@@ -259,11 +290,15 @@ class Daemon:
             resolved, source = resolve_playlist_name(
                 url, overrides=overrides, name_cache=name_cache, safe=settings.safe_filenames
             )
-            # Its own current filename must not count as a collision.
-            seen.discard(resolved.casefold())
-            unique = uniquify(resolved, url, seen)
+            lowered = resolved.casefold()
+            if lowered not in claimed:
+                on_disk.discard(lowered)
+            unique = uniquify(resolved, url, claimed | on_disk)
+            claimed.add(unique.casefold())
             plan.append((url, unique))
             log.debug("resolved %s -> %r (via %s)", url, unique, source)
+
+        self._claimed_names = {name.casefold() for _, name in plan}
 
         work = [(url, name) for url, name in plan if url in target_set]
         if len(work) != len(plan):
@@ -275,7 +310,12 @@ class Daemon:
                 list(pool.map(lambda item: self._sync_guarded(settings, *item), work))
         else:
             for url, name in work:
+                # Between playlists is the only safe point to notice a cancel,
+                # and it is the only place the control directory gets read while
+                # a cycle is running.
+                self._handle_commands()
                 if self.stop_event.is_set() or self.cancel_event.is_set():
+                    log.info("cycle cancelled after %d playlist(s)", work.index((url, name)))
                     break
                 self._sync_guarded(settings, url, name)
 
@@ -316,28 +356,31 @@ class Daemon:
         output_root = Path(settings.output_location)
         m3u_dir = Path(settings.playlist_m3u_dir)
 
-        # gamdl builds the playlist path as <output>/<folder template>/<file
-        # template>.m3u, so the folder template is the m3u directory expressed
-        # relative to the library root.
-        try:
-            folder_template = m3u_dir.relative_to(output_root).as_posix()
-        except ValueError:
-            # The playlist directory lives outside the library. gamdl can only
-            # write beneath its output path, so let it write into a staging
-            # folder and move the result afterwards.
-            folder_template = ".gamdl-playlists"
+        # gamdl always writes into a staging folder, never into the published
+        # playlist directory.
+        #
+        # It has to be a separate directory because the file must be deleted
+        # before each run — gamdl only overwrites the lines it touches and never
+        # truncates, so a surviving file would keep tracks the playlist no longer
+        # contains. Pointing gamdl straight at the published path meant that
+        # delete removed the live playlist, and a run that then failed left the
+        # user with no playlist file at all.
+        #
+        # gamdl can only write beneath its own --output-path, so staging lives
+        # there, hidden, and is emptied as we go.
+        staging_dir = output_root / STAGING_DIRNAME
+        staging_dir.mkdir(parents=True, exist_ok=True)
 
         # gamdl replaces its own illegal characters, so the file it writes may
-        # not be the name we asked for. Compute both.
+        # not carry the name we asked for.
         gamdl_stem = predict_gamdl_name(name)
-        gamdl_output = output_root / folder_template / f"{gamdl_stem}.m3u"
+        staged = staging_dir / f"{gamdl_stem}.m3u"
         target = m3u_dir / f"{name}.m3u8"
 
-        # Regenerate from scratch: gamdl only overwrites the lines it touches and
-        # never truncates, so a stale file would keep tracks that are no longer
-        # in the playlist.
-        for stale in (gamdl_output, gamdl_output.with_suffix(".m3u8")):
+        for stale in (staged, staged.with_suffix(".m3u8"), staging_dir / f"{name}.m3u"):
             stale.unlink(missing_ok=True)
+
+        folder_template = STAGING_DIRNAME
 
         args = build_args(
             settings,
@@ -353,11 +396,7 @@ class Daemon:
             stop_event=self.stop_event,
         )
 
-        produced = _first_existing(
-            gamdl_output,
-            gamdl_output.with_suffix(".m3u8"),
-            output_root / folder_template / f"{name}.m3u",
-        )
+        produced = _first_existing(staged, staged.with_suffix(".m3u8"), staging_dir / f"{name}.m3u")
 
         if produced is None:
             # No playlist file this cycle. Keep whatever is already published so
@@ -388,6 +427,7 @@ class Daemon:
             output_root=output_root,
             title=name,
             prune_missing=settings.prune_playlist_entries,
+            source_dir=produced.parent,
         )
 
         # A run that died partway leaves a partial file. Publishing it would
@@ -415,8 +455,7 @@ class Daemon:
 
         m3u_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_text(target, repaired.text)
-        if produced != target:
-            produced.unlink(missing_ok=True)
+        produced.unlink(missing_ok=True)
         # An older run may have left a .m3u beside the .m3u8 we now write.
         legacy = m3u_dir / f"{name}.m3u"
         if legacy != target:
@@ -452,15 +491,25 @@ class Daemon:
         )
 
     def _drop_previous_file(self, url: str, current: Path) -> None:
-        """Remove the file this playlist used to occupy after a rename."""
+        """Remove the file this playlist used to occupy after a rename.
+
+        The check against ``_claimed_names`` matters when two playlists swap
+        titles through the overrides file: the second one to sync would otherwise
+        delete the file the first had just written, because that path is still
+        recorded as the second one's previous location.
+        """
         entry = self.status.read().get(url) or {}
         previous = entry.get("playlistFile")
         if not previous or previous == str(current):
             return
         path = Path(previous)
-        if path.is_file() and path.parent == current.parent:
-            path.unlink(missing_ok=True)
-            log.info("removed superseded playlist file %s", path.name)
+        if not path.is_file() or path.parent != current.parent:
+            return
+        if path.stem.casefold() in self._claimed_names:
+            log.info("keeping %s — another playlist now claims that name", path.name)
+            return
+        path.unlink(missing_ok=True)
+        log.info("removed superseded playlist file %s", path.name)
 
     def _sweep_orphans(self, settings: Settings, keep_names: list[str]) -> None:
         """Quarantine playlist files that no configured playlist claims.
@@ -524,6 +573,8 @@ class Daemon:
         The background thread republishes this on a fixed cadence, so callers
         only need to say what changed rather than remembering to tick.
         """
+        if state != self._state or detail != self._detail:
+            self._state_since = time.monotonic()
         self._state = state
         self._detail = detail
         now = time.monotonic()

@@ -73,14 +73,78 @@ export interface ResolvedPlaylistMeta {
 }
 
 function cleanTitle(raw: string): string {
-  // Apple pads page titles with invisible marks and marketing suffixes.
-  return raw
+  // Apple pads page titles with invisible marks and a marketing suffix. The
+  // suffix is separated by the word "on" as often as by a dash — og:title reads
+  // "Today's Hits on Apple Music" — and matching only the dash form left the
+  // suffix in the playlist's filename.
+  const cleaned = raw
     .normalize('NFC')
     .replace(/[‎‏⁠﻿]/g, '')
-    .replace(/\s*[|–—-]\s*Apple\s*Music.*$/i, '')
+    .replace(/\s*(?:[|–—-]|\bon\b)\s*Apple\s*Music\s*$/i, '')
     .replace(/\s*[–—-]\s*playlist\s+by\s+.*$/i, '')
     .replace(/\s+/g, ' ')
     .trim()
+
+  // Never let the stripping consume the whole name: a playlist really called
+  // "Apple Music" should keep its name rather than become empty.
+  return cleaned || raw.normalize('NFC').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Pull a `<meta>` content value, matching the closing quote to the opening one.
+ *
+ * A naive `content=["']([^"']+)["']` stops at the first quote of *either* kind,
+ * so `content="Today's Hits"` captured `Today`. Apostrophes are extremely common
+ * in playlist titles, and the truncated value was cached and then used as the
+ * on-disk filename.
+ */
+function matchMetaContent(html: string, property: string): string | undefined {
+  const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(
+    `<meta[^>]*\\b(?:property|name)=["']${escaped}["'][^>]*\\bcontent=(?:"([^"]*)"|'([^']*)')`,
+    'i',
+  )
+  const match = html.match(pattern)
+  if (!match) return undefined
+  return match[1] ?? match[2]
+}
+
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+  hellip: '…',
+  mdash: '—',
+  ndash: '–',
+  lsquo: '‘',
+  rsquo: '’',
+  ldquo: '“',
+  rdquo: '”',
+}
+
+/**
+ * Decode the HTML entities Apple actually emits in a title.
+ *
+ * Without this, `Rock &amp; Roll` became a filename containing a literal
+ * `&amp;`. `&amp;` is decoded last so `&amp;#39;` yields `'` rather than
+ * re-entering the decoder — a double decode would let a crafted title smuggle
+ * characters past the sanitizer.
+ */
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => safeCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => safeCodePoint(parseInt(dec, 10)))
+    .replace(/&([a-z]+);/gi, (whole, name) => NAMED_ENTITIES[name.toLowerCase()] ?? whole)
+}
+
+function safeCodePoint(code: number): string {
+  if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff) return ''
+  // Lone surrogates would produce an unpaired code unit that breaks JSON round-trips.
+  if (code >= 0xd800 && code <= 0xdfff) return ''
+  return String.fromCodePoint(code)
 }
 
 // The only place in the server layer allowed to talk to Apple. Called once
@@ -99,9 +163,9 @@ export async function fetchPlaylistMetadata(url: string, timeoutMs = 5000): Prom
     })
     if (!response.ok) return {}
     const html = await response.text()
-    const ogTitle = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i)?.[1]
-    const titleTag = html.match(/<title>([^<]+)<\/title>/i)?.[1]
-    const name = cleanTitle(ogTitle || titleTag || '')
+    const ogTitle = matchMetaContent(html, 'og:title')
+    const titleTag = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]
+    const name = cleanTitle(decodeEntities(ogTitle || titleTag || ''))
     const trackCountRaw = html.match(/"trackCount"\s*:\s*(\d{1,6})/)?.[1]
     const songCount = trackCountRaw ? Number(trackCountRaw) : undefined
     return {

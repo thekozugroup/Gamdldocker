@@ -136,9 +136,7 @@ RUN chmod +x /app/entrypoint.sh
 # A file the daemon refreshes as it works, so the check proves progress rather
 # than merely proving a process exists.
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import json,sys,time; \
-b=json.load(open('/config/.downloader-heartbeat')); \
-sys.exit(0 if time.time()-b['ts'] < 900 else 1)" || exit 1
+    CMD python -c "import json,sys,time; b=json.load(open('/config/.downloader-heartbeat')); sys.exit(0 if time.time()-b['ts'] < 900 and b.get('stalledFor', 0) < 3600 else 1)" || exit 1
 
 # tini reaps the zombies that ffmpeg and N_m3u8DL-RE leave behind and forwards
 # signals, so `docker stop` is clean instead of a 10-second timeout and a kill.

@@ -18,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,13 @@ __all__ = ["GamdlCapabilities", "GamdlResult", "build_args", "probe_capabilities
 # pairs instead, so both shapes are matched.
 _TRACK_RE = re.compile(r"[Tt]rack\s+(\d+)\s*/\s*(\d+)")
 _STRUCTLOG_TRACK_RE = re.compile(r"\bmedia_num=(\d+)\b.*?\bmedia_total=(\d+)\b")
+
+#: Kill gamdl if it produces no output at all for this long. A real download
+#: prints steadily; silence means a stalled connection or a wedged helper.
+DEFAULT_IDLE_TIMEOUT = 900.0
+#: A ceiling for one playlist, so a pathological run cannot occupy the loop
+#: forever. Large playlists on slow links still fit comfortably.
+DEFAULT_OVERALL_TIMEOUT = 6 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -229,6 +237,8 @@ def run_gamdl(
     stop_event: threading.Event | None = None,
     env: dict[str, str] | None = None,
     max_retained_lines: int = 400,
+    idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
+    overall_timeout: float = DEFAULT_OVERALL_TIMEOUT,
 ) -> GamdlResult:
     """Run gamdl, streaming its output.
 
@@ -273,10 +283,39 @@ def run_gamdl(
         log.error("failed to start gamdl: %s", exc)
         return GamdlResult(returncode=127, lines=[f"failed to start gamdl: {exc}"])
 
-    stopped = False
+    # Reading gamdl's output blocks in readline, so a child that goes quiet —
+    # a stalled TLS connection, a hung N_m3u8DL-RE — would never return and
+    # nothing in the loop would notice, not even a stop signal. A watchdog
+    # thread owns the two deadlines instead, because it can act while the reader
+    # is blocked.
+    last_output = [time.monotonic()]
+    reason: list[str] = []
+    watchdog_done = threading.Event()
+
+    def watchdog() -> None:
+        started = time.monotonic()
+        while not watchdog_done.wait(1.0):
+            now = time.monotonic()
+            if stop_event is not None and stop_event.is_set():
+                reason.append("stopped")
+                _terminate(proc)
+                return
+            if idle_timeout and (now - last_output[0]) > idle_timeout:
+                reason.append(f"no output for {int(now - last_output[0])}s")
+                _terminate(proc)
+                return
+            if overall_timeout and (now - started) > overall_timeout:
+                reason.append(f"exceeded the {int(overall_timeout)}s limit")
+                _terminate(proc)
+                return
+
+    guard = threading.Thread(target=watchdog, name="gamdl-watchdog", daemon=True)
+    guard.start()
+
     try:
         assert proc.stdout is not None
         for raw in proc.stdout:
+            last_output[0] = time.monotonic()
             line = raw.rstrip("\n")
             if on_line:
                 on_line(line)
@@ -289,11 +328,9 @@ def run_gamdl(
                 current, total = int(match.group(1)), int(match.group(2))
                 if on_progress:
                     on_progress(current, total)
-
-            if stop_event is not None and stop_event.is_set() and not stopped:
-                stopped = True
-                _terminate(proc)
     finally:
+        watchdog_done.set()
+        guard.join(timeout=5)
         try:
             proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
@@ -301,6 +338,11 @@ def run_gamdl(
             proc.wait(timeout=10)
         if proc.stdout is not None:
             proc.stdout.close()
+
+    if reason:
+        message = f"gamdl was stopped: {reason[0]}"
+        log.warning("%s", message)
+        retained.append(message)
 
     return GamdlResult(
         returncode=proc.returncode if proc.returncode is not None else 1,

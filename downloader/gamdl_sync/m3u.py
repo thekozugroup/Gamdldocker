@@ -147,19 +147,25 @@ def repair_playlist(
     title: str,
     prune_missing: bool = True,
     read_tags: bool = True,
+    source_dir: Path | None = None,
 ) -> RepairResult:
     """Turn gamdl's raw output into a well-formed, current ``.m3u8``.
 
     Order is preserved (it is the playlist's order), duplicates are dropped, and
     entries whose media is not on disk are either removed or counted, depending
     on ``prune_missing``.
+
+    ``source_dir`` is where gamdl wrote ``source``, which is a staging directory
+    rather than ``m3u_dir``; its lines are relative to that. The rewritten lines
+    are always relative to ``m3u_dir``, where the file is about to be published.
     """
     raw_lines = read_entries(source, m3u_dir)
+    resolve_base = source_dir if source_dir is not None else source.parent
 
     entries: list[PlaylistEntry] = []
     seen: set[str] = set()
     for raw in raw_lines:
-        absolute = _resolve(raw, m3u_dir, output_root)
+        absolute = _resolve(raw, resolve_base, output_root)
         key = str(absolute)
         if key in seen:
             continue

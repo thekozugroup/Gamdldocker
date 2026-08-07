@@ -13,7 +13,6 @@ that refuses to start because of one is an outage.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -45,34 +44,71 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 
 
+#: A lock older than this is assumed to belong to a process that died holding
+#: it. Both sides of the fence use the same value — see webui/lib/fsx.ts.
+LOCK_STALE_SECONDS = 30.0
+LOCK_SUFFIX = ".lock"
+
+
 @contextmanager
 def FileLock(path: Path, *, timeout: float = 30.0) -> Iterator[None]:  # noqa: N802
-    """Advisory exclusive lock on ``<path>.lock``.
+    """Exclusive lock on ``<path>.lock``, shared with the web UI.
 
-    We lock a sidecar rather than the file itself so the lock survives the
+    The obvious implementation is ``flock``, and that is what this used to be —
+    but Node has no ``flock``, so the web UI could only take an ``O_EXCL``
+    lockfile. Two different mechanisms on two different filenames are two locks
+    that do not exclude each other, which is worse than no lock at all because
+    the code reads as though it is safe. Both sides now race for the same file
+    with ``O_EXCL``, the one primitive both runtimes have.
+
+    A sidecar is locked rather than the file itself so the lock survives the
     ``os.replace`` that swaps the real file out from under us.
     """
-    lock_path = path.with_name(path.name + ".lock")
+    lock_path = path.with_name(path.name + LOCK_SUFFIX)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout
-    handle = lock_path.open("a+")  # released in the finally below
-    try:
-        while True:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    acquired = False
+
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            if _lock_is_stale(lock_path):
+                log.warning("breaking a stale lock on %s", path.name)
+                with contextlib.suppress(OSError):
+                    lock_path.unlink()
+                continue
+            if time.monotonic() >= deadline:
+                # Proceeding unlocked is better than stalling the sync loop
+                # forever. Writes are atomic regardless, so the worst case is a
+                # lost concurrent update, not a corrupt file.
+                log.warning("timed out waiting for the lock on %s; proceeding", path.name)
                 break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    # Proceeding unlocked is better than stalling the sync loop
-                    # forever because some process died holding the lock.
-                    log.warning("timed out waiting for lock on %s; proceeding", path)
-                    break
-                time.sleep(0.05)
+            time.sleep(0.05)
+            continue
+        except OSError as exc:
+            log.warning("could not create a lock for %s (%s); proceeding", path.name, exc)
+            break
+
+        with os.fdopen(fd, "w") as handle:
+            handle.write(f'{{"pid": {os.getpid()}, "ts": {time.time():.3f}}}')
+        acquired = True
+        break
+
+    try:
         yield
     finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        if acquired:
+            with contextlib.suppress(OSError):
+                lock_path.unlink()
+
+
+def _lock_is_stale(lock_path: Path) -> bool:
+    try:
+        return (time.time() - lock_path.stat().st_mtime) > LOCK_STALE_SECONDS
+    except OSError:
+        # It vanished between the failed create and the stat — treat it as free.
+        return True
 
 
 def read_json(path: Path | str, default: Any = None) -> Any:
@@ -294,7 +330,14 @@ class NameCache:
 # --------------------------------------------------------------------------- #
 
 
-def write_heartbeat(path: Path | str, *, state: str, cycle: int, detail: str = "") -> None:
+def write_heartbeat(
+    path: Path | str,
+    *,
+    state: str,
+    cycle: int,
+    detail: str = "",
+    stalled_for: float = 0.0,
+) -> None:
     """Publish liveness for the container healthcheck and the web UI.
 
     A file beats ``pgrep`` because it proves the loop is *progressing*, not just
@@ -310,6 +353,10 @@ def write_heartbeat(path: Path | str, *, state: str, cycle: int, detail: str = "
                 "state": state,
                 "cycle": cycle,
                 "detail": detail,
+                # Seconds since the daemon last changed what it was doing. The
+                # write timestamp alone would stay fresh forever while the sync
+                # thread is wedged, so this is what "is it healthy" reads.
+                "stalledFor": round(stalled_for, 1),
             },
         )
     except OSError as exc:

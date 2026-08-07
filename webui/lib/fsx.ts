@@ -2,21 +2,21 @@
 // is temp-file + fsync + rename so a reader never observes a torn file, and
 // read-modify-write cycles are serialised through a sidecar lockfile.
 //
-// Locking choice, documented as required: the daemon locks with flock(2) on
-// `<path>.lock`, which Node's core fs cannot participate in (no flock binding,
-// and adding a native dependency is off the table). We therefore serialise
-// *webui-side* writers with an O_EXCL lockfile at `<path>.webui.lock` — created
-// with the 'wx' flag, removed on release, with a stale-lock timeout for the
-// case where a crashed process left it behind. Cross-process safety against the
-// daemon still holds because both sides only ever publish whole files via
-// atomic rename; the worst cross-process race is a lost merge on a file the
-// daemon rewrites every cycle anyway.
+// Locking: both sides race for the SAME `<path>.lock` file using O_EXCL, which
+// is the one primitive Node and Python both have — Node has no flock binding and
+// a native dependency is off the table. An earlier version had the daemon take
+// an flock on `<path>.lock` while this side took an O_EXCL lock on
+// `<path>.webui.lock`; two mechanisms on two filenames are two locks that never
+// exclude each other, which is worse than no lock because the code reads as
+// though it is safe. LOCK_STALE_MS must stay equal to LOCK_STALE_SECONDS in
+// downloader/gamdl_sync/state.py, or the two sides will disagree about when a
+// lock left behind by a crashed process may be broken.
 import fs from 'fs'
 import fsp from 'fs/promises'
 import path from 'path'
 import crypto from 'crypto'
 
-const LOCK_SUFFIX = '.webui.lock'
+const LOCK_SUFFIX = '.lock'
 const LOCK_TIMEOUT_MS = 30_000
 const LOCK_STALE_MS = 30_000
 const LOCK_RETRY_MS = 50
