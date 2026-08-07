@@ -1,60 +1,112 @@
-services:
-  gamdl-downloader:
-    build: .
-    image: gamdl-downloader:latest
-    container_name: gamdl-downloader
-    restart: unless-stopped
-    env_file:
-      - path: .env
-        required: false
-    volumes:
-      - ./config:/config
-      - ${MUSIC_HOST_PATH:-./downloads}:/data/music
-    environment:
-      - FREQUENCY=3600
-      - OUTPUT_DIR=/data/music
-      - PLAYLIST_M3U_DIR=/data/music/playlists
-      - DOWNLOAD_MODE=nm3u8dlre
-      - AUTO_UPDATE=true
-      - AUTO_UPDATE_INTERVAL=86400
-      # AUTO_UPDATE_GAMDL: leave to .env (default false). Set to true to
-      # auto-bump gamdl on every AUTO_UPDATE_INTERVAL cycle.
-      - AUTO_UPDATE_GAMDL=${AUTO_UPDATE_GAMDL:-false}
-      - TZ=America/New_York
-    healthcheck:
-      test: ["CMD", "pgrep", "-f", "entrypoint"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    depends_on:
-      - webui
+# Gamdl — Apple Music playlist sync.
+#
+#   cp .env.example .env
+#   docker compose up -d --build
+#
+# Note on configuration: values here are written as ${VAR:-default} rather than
+# as literals. A literal in `environment:` silently overrides whatever the same
+# key says in `.env`, which is how v1 ended up with a documented set of knobs
+# that did nothing at all.
 
+name: gamdl
+
+x-logging: &logging
+  driver: json-file
+  options:
+    # Without a cap, a long-running downloader will fill the host disk with logs.
+    # The daemon keeps its own rotated copy under config/logs regardless.
+    max-size: "10m"
+    max-file: "3"
+
+services:
   webui:
-    build: ./webui
+    build:
+      context: ./webui
     image: gamdl-webui:latest
     container_name: gamdl-webui
     restart: unless-stopped
     ports:
+      # Defaults to every interface. Set BIND_HOST in .env to a Tailscale or
+      # loopback address to keep it off the open network — there is no
+      # authentication unless you set WEBUI_AUTH_TOKEN.
       - "${BIND_HOST:-0.0.0.0}:${WEBUI_PORT:-3000}:3000"
     volumes:
       - ./config:/config
       - ${MUSIC_HOST_PATH:-./downloads}:/data/music
-      - /var/run/docker.sock:/var/run/docker.sock
+      # No docker socket. "Sync now" is a file in ./config/control that the
+      # downloader watches, and logs are read from ./config/logs — mounting the
+      # socket would have given this container root on the host.
     environment:
       - NODE_ENV=production
-      - DOWNLOAD_CONTAINER=gamdl-downloader
-      - TZ=America/New_York
+      - CONFIG_DIR=/config
+      - TZ=${TZ:-UTC}
+      - WEBUI_AUTH_TOKEN=${WEBUI_AUTH_TOKEN:-}
+      - WEBUI_USERNAME=${WEBUI_USERNAME:-}
+      - WEBUI_PASSWORD=${WEBUI_PASSWORD:-}
     env_file:
       - path: .env
         required: false
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/settings').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
+    logging: *logging
 
+  gamdl-downloader:
+    build:
+      context: .
+      args:
+        # Empty means "current at build time". Pin to a version string for a
+        # reproducible image; the runtime updater can still move past it.
+        GAMDL_VERSION: ${GAMDL_VERSION:-}
+        # "pinned" uses a known-good release without contacting the GitHub API.
+        # "latest" resolves the newest release during the build.
+        NM3U8DLRE_VERSION: ${NM3U8DLRE_VERSION:-pinned}
+    image: gamdl-downloader:latest
+    container_name: gamdl-downloader
+    restart: unless-stopped
+    volumes:
+      - ./config:/config
+      - ${MUSIC_HOST_PATH:-./downloads}:/data/music
+      # A named volume, not the container's writable layer: staging a download
+      # on the overlay filesystem is slow and counts against the container's
+      # storage quota.
+      - gamdl-temp:/data/temp
+    environment:
+      - CONFIG_DIR=/config
+      - OUTPUT_DIR=${OUTPUT_LOCATION:-/data/music}
+      - PLAYLIST_M3U_DIR=${PLAYLIST_M3U_DIR:-/data/music/playlists}
+      - TEMP_PATH=/data/temp
+      - FREQUENCY=${FREQUENCY:-3600}
+      - DOWNLOAD_MODE=${DOWNLOAD_MODE:-nm3u8dlre}
+      - AUTO_UPDATE=${AUTO_UPDATE:-true}
+      - AUTO_UPDATE_INTERVAL=${AUTO_UPDATE_INTERVAL:-86400}
+      - AUTO_UPDATE_GAMDL=${AUTO_UPDATE_GAMDL:-true}
+      - SAFE_FILENAMES=${SAFE_FILENAMES:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PUID=${PUID:-}
+      - PGID=${PGID:-}
+      - TZ=${TZ:-UTC}
+    env_file:
+      - path: .env
+        required: false
+    # The daemon finishes the track it is on, writes its state and exits. Without
+    # the grace period Docker would SIGKILL it mid-write after 10 seconds.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,sys,time; b=json.load(open('/config/.downloader-heartbeat')); sys.exit(0 if time.time()-b['ts'] < 900 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging: *logging
+
+  # Optional: keeps the container images themselves current.
+  #   docker compose --profile updates up -d
+  # The downloader already updates gamdl and N_m3u8DL-RE inside the container,
+  # so this is only needed to pick up new releases of this project.
   auto-updater:
     image: containrrr/watchtower:latest
     container_name: gamdl-watchtower
@@ -64,3 +116,7 @@ services:
     command: --interval 21600 --cleanup gamdl-downloader gamdl-webui
     profiles:
       - updates
+    logging: *logging
+
+volumes:
+  gamdl-temp:

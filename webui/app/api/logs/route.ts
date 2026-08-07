@@ -1,68 +1,43 @@
+// Logs come from the file the daemon writes into the shared volume — never
+// from `docker logs`, which would require mounting the docker socket.
 import { NextResponse } from 'next/server'
-import { exec } from 'child_process'
-import { promisify } from 'util'
-import fs from 'fs/promises'
-import path from 'path'
+import { readTextTail } from '@/lib/fsx'
+import { DOWNLOADER_LOG } from '@/lib/paths'
 
-const execAsync = promisify(exec)
-const DOWNLOAD_CONTAINER = process.env.DOWNLOAD_CONTAINER || 'gamdl-downloader'
-const CONFIG_DIR = process.env.CONFIG_DIR || '/config'
-const STATUS_FILE = path.join(CONFIG_DIR, 'playlist-status.json')
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
+const MIN_LINES = 20
+const MAX_LINES = 2000
+const DEFAULT_LINES = 200
 
 function clampLines(value: string | null): number {
-  const parsed = Number(value || 160)
-  if (!Number.isFinite(parsed)) return 160
-  return Math.min(500, Math.max(20, Math.floor(parsed)))
-}
-
-async function getStatusSummary() {
-  const raw = await fs.readFile(STATUS_FILE, 'utf-8').catch(() => '')
-  if (!raw) return { idle: 0, running: 0, complete: 0, failed: 0 }
-
-  let statusMap: Record<string, { status?: 'idle' | 'running' | 'complete' | 'failed' }> = {}
-  try {
-    statusMap = JSON.parse(raw)
-  } catch {
-    return { idle: 0, running: 0, complete: 0, failed: 0 }
-  }
-
-  const summary = { idle: 0, running: 0, complete: 0, failed: 0 }
-  for (const entry of Object.values(statusMap)) {
-    const status = entry.status || 'idle'
-    if (status in summary) {
-      summary[status as keyof typeof summary] += 1
-    }
-  }
-  return summary
+  const parsed = Number(value ?? DEFAULT_LINES)
+  if (!Number.isFinite(parsed)) return DEFAULT_LINES
+  return Math.min(MAX_LINES, Math.max(MIN_LINES, Math.floor(parsed)))
 }
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url)
-  const lines = clampLines(searchParams.get('lines'))
-
+  const lines = clampLines(new URL(request.url).searchParams.get('lines'))
   try {
-    const [logsResult, summary] = await Promise.all([
-      execAsync(`docker logs --tail ${lines} ${DOWNLOAD_CONTAINER} 2>&1`).catch((error) => ({
-        stdout: '',
-        stderr: error instanceof Error ? error.message : 'Failed to read logs',
-      })),
-      getStatusSummary(),
-    ])
-
-    const logs = [logsResult.stdout, logsResult.stderr].filter(Boolean).join('\n').trim()
-
+    const tail = await readTextTail(DOWNLOADER_LOG, lines)
+    if (tail === null) {
+      return NextResponse.json({
+        logs: '',
+        missing: true,
+        message: `No log file at ${DOWNLOADER_LOG} yet — the downloader has not started, or the containers do not share the /config volume.`,
+        updatedAt: new Date().toISOString(),
+      })
+    }
     return NextResponse.json({
-      logs,
-      statusSummary: summary,
+      logs: tail,
+      missing: false,
+      lines,
       updatedAt: new Date().toISOString(),
     })
   } catch (error) {
     return NextResponse.json(
-      {
-        logs: 'Failed to load logs',
-        statusSummary: { idle: 0, running: 0, complete: 0, failed: 0 },
-        updatedAt: new Date().toISOString(),
-      },
+      { error: 'Failed to read the log file', detail: error instanceof Error ? error.message : String(error) },
       { status: 500 }
     )
   }

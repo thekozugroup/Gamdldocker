@@ -1,0 +1,20 @@
+# Default: normalize text files to LF, let git decide what's text.
+* text=auto eol=lf
+
+# Shell scripts must stay LF — a CRLF shebang line fails with "bad interpreter"
+# and the entrypoint is POSIX sh, not bash, which won't survive that either.
+*.sh text eol=lf
+scripts/*.sh text eol=lf
+
+# Generated lockfile: collapse it in PR diffs (GitHub's linguist-generated
+# marker) — always regenerate with `npm install` instead of hand-editing it.
+webui/package-lock.json linguist-generated=true
+
+# Binary assets: never touched by line-ending normalization.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  - package-ecosystem: "npm"
+    directory: "/webui"
+    schedule:
+      interval: "weekly"
+    groups:
+      radix-ui:
+        patterns:
+          - "@radix-ui/*"
+
+  - package-ecosystem: "pip"
+    directory: "/downloader"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Two entries: dependabot's docker ecosystem scans one Dockerfile per
+  # directory, and the two images live in different directories.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/webui"
+    schedule:
+      interval: "weekly"

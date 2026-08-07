@@ -1,0 +1,191 @@
+name: gamdl Watch
+
+# gamdl's own releases are what actually keeps this stack downloading — Apple
+# changes its web player often enough that a stale pin quietly stops working.
+# This workflow is the "somebody should notice" half of that: it never changes
+# what a release actually ships (the root Dockerfile's GAMDL_VERSION build arg
+# still decides that), it only tells a human a new release exists and proves,
+# with a real build, that adopting it wouldn't immediately break.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: gamdl-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check PyPI for a newer gamdl
+    runs-on: ubuntu-latest
+    outputs:
+      latest: ${{ steps.pypi.outputs.latest }}
+      recorded: ${{ steps.recorded.outputs.recorded }}
+      changed: ${{ steps.compare.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Query PyPI
+        id: pypi
+        run: |
+          latest="$(curl -fsSL --retry 3 --retry-delay 2 https://pypi.org/pypi/gamdl/json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')"
+          if [ -z "$latest" ]; then
+            echo "could not resolve the latest gamdl version from PyPI" >&2
+            exit 1
+          fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+      - name: Read the version recorded in the repo
+        id: recorded
+        run: echo "recorded=$(cat .github/gamdl-version.txt 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+
+      - name: Compare
+        env:
+          # Never interpolate a third-party string into `run:` — a version
+          # containing a backtick or $() would execute on the runner.
+          LATEST: ${{ steps.pypi.outputs.latest }}
+          RECORDED: ${{ steps.recorded.outputs.recorded }}
+        id: compare
+        run: |
+          if [ "$LATEST" != "$RECORDED" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  smoke-test:
+    name: Build the downloader image with the new gamdl
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.summary.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (linux/amd64, GAMDL_VERSION=${{ needs.check.outputs.latest }})
+        id: build
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          build-args: GAMDL_VERSION=${{ needs.check.outputs.latest }}
+          tags: gamdl-downloader:gamdl-watch
+          cache-from: type=gha,scope=gamdl-watch
+          cache-to: type=gha,mode=max,scope=gamdl-watch
+
+      - name: Confirm gamdl actually runs
+        id: run
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: docker run --rm gamdl-downloader:gamdl-watch gamdl --version
+
+      - name: Summarize
+        id: summary
+        run: |
+          if [ "${{ steps.build.outcome }}" = "success" ] && [ "${{ steps.run.outcome }}" = "success" ]; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+          fi
+
+  report:
+    name: Open/update the tracking issue
+    needs: [check, smoke-test]
+    if: always() && needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Open or update the tracking issue
+        uses: actions/github-script@v7
+        env:
+          LATEST: ${{ needs.check.outputs.latest }}
+          RECORDED: ${{ needs.check.outputs.recorded }}
+          SMOKE_RESULT: ${{ needs.smoke-test.outputs.result }}
+        with:
+          script: |
+            const title = "gamdl update watch";
+            const { LATEST, RECORDED, SMOKE_RESULT } = process.env;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const smokeLine = SMOKE_RESULT === "success"
+              ? `The downloader image built and \`gamdl --version\` ran cleanly with \`GAMDL_VERSION=${LATEST}\` (smoke test passed).`
+              : `The downloader image smoke test **failed** with \`GAMDL_VERSION=${LATEST}\` — see the [workflow run](${runUrl}) before adopting it.`;
+
+            const body = [
+              "A newer `gamdl` release is available on PyPI.",
+              "",
+              `- Latest on PyPI: \`${LATEST}\``,
+              `- Previously recorded in this repo: \`${RECORDED || "(none)"}\``,
+              `- ${smokeLine}`,
+              "",
+              "Bump `GAMDL_VERSION` in the root `Dockerfile` when you're ready to adopt it, " +
+              "then close this issue — the next scheduled check reopens/comments on a new one " +
+              "once another release ships.",
+              "",
+              `_Checked ${new Date().toISOString()} by [gamdl-watch](${runUrl})._`,
+            ].join("\n");
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100,
+            });
+            const existing = issues.find((i) => !i.pull_request && i.title === title);
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ["gamdl-watch"],
+              });
+            }
+
+      # Record what we've already reported so next week's run only opens a new
+      # issue/comment for a version nobody has been told about yet — this is
+      # what keeps the workflow from spamming the same PyPI release every
+      # Monday regardless of whether the smoke test passed.
+      - name: Record the reported version
+        env:
+          # A version string parsed out of a PyPI response is third-party input.
+          # Interpolated into `run:` it would execute on a runner that holds a
+          # write token; through the environment it is inert data.
+          LATEST: ${{ needs.check.outputs.latest }}
+        run: |
+          printf '%s\n' "$LATEST" > .github/gamdl-version.txt
+          if git diff --quiet -- .github/gamdl-version.txt; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/gamdl-version.txt
+          git commit -m "chore(gamdl-watch): record gamdl $LATEST"
+          git push

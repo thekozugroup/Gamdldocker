@@ -1,109 +1,146 @@
-FROM python:3.12-slim
+# syntax=docker/dockerfile:1
+#
+# Downloader image: gamdl plus the scheduling daemon that drives it.
+#
+# Built in two stages so the runtime layer carries no compilers or build caches.
+# The N_m3u8DL-RE download is *verified* rather than best-effort — v1 used
+# `|| true`, which meant a network hiccup during a build produced an image that
+# started fine and then failed every download.
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    curl \
-    tar \
-    xz-utils \
-    procps \
+# --------------------------------------------------------------------------- #
+# Stage 1 — build the virtualenv
+# --------------------------------------------------------------------------- #
+FROM python:3.12-slim AS builder
+
+# Empty means "whatever is current at build time". Pin it (e.g. 3.8.5) for a
+# reproducible image; the runtime auto-update can still move forward from there.
+ARG GAMDL_VERSION=""
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl tar \
     && rm -rf /var/lib/apt/lists/*
 
-# Install gamdl
-RUN pip install --no-cache-dir gamdl
+ENV VIRTUAL_ENV=/opt/venv
+RUN python -m venv "$VIRTUAL_ENV"
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Patch gamdl regex for newer Apple Music index bundle names.
-# Tolerant: gamdl 2.x exposes the regex in gamdl.apple_music_api, gamdl 3.x
-# moved it to gamdl.api. No-op if neither module exists or the legacy
-# pattern is already gone — keeps the build green across upstream churn.
-RUN python - <<'PY'
-from pathlib import Path
-import importlib
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-OLD = r'r"/(assets/index-legacy-[^/]+\.js)",'
-NEW = r'r"/(assets/index(?:-legacy)?-[^/]+\.js)",'
+# gamdl first, on its own layer: it is the slowest install and the one most
+# likely to change, so keeping it separate keeps rebuilds of our own code fast.
+RUN if [ -n "$GAMDL_VERSION" ]; then \
+        pip install --no-cache-dir "gamdl==${GAMDL_VERSION}"; \
+    else \
+        pip install --no-cache-dir gamdl; \
+    fi \
+    && pip install --no-cache-dir mutagen \
+    && gamdl --version
 
-for mod_name in ("gamdl.api", "gamdl.apple_music_api"):
-    try:
-        module = importlib.import_module(mod_name)
-    except Exception:
-        continue
-    file_path = Path(module.__file__)
-    try:
-        content = file_path.read_text(encoding="utf-8")
-    except Exception:
-        continue
-    if OLD in content and NEW not in content:
-        file_path.write_text(content.replace(OLD, NEW), encoding="utf-8")
-        print(f"patched {mod_name}")
-        break
-else:
-    print("no patch needed (regex already current or module renamed again)")
-PY
+COPY downloader/pyproject.toml /src/downloader/
+COPY downloader/gamdl_sync /src/downloader/gamdl_sync
+RUN pip install --no-cache-dir --no-deps /src/downloader
 
-# Patch gamdl 3.x _update_playlist_file: when Apple metadata reports
-# playlist_track == 0 (rare, but happens for some single-track media),
-# the upstream code falls through to `playlist_file_lines[-1]` on an
-# empty list and raises IndexError, aborting the track. Guard with an
-# early return so the rest of the cycle continues.
-RUN python - <<'PY'
-from pathlib import Path
-import importlib
+# Record what shipped, so the runtime updater knows what to roll back to.
+RUN gamdl --version > /opt/gamdl-baseline 2>&1 || echo "unknown" > /opt/gamdl-baseline
 
-try:
-    module = importlib.import_module("gamdl.downloader.downloader")
-except Exception:
-    print("gamdl.downloader.downloader not found — skipping playlist-track guard")
-else:
-    file_path = Path(module.__file__)
-    content = file_path.read_text(encoding="utf-8")
-    old = (
-        '        if len(playlist_file_lines) < playlist_track:\n'
-        '            playlist_file_lines.extend('
-    )
-    new = (
-        '        if playlist_track is None or playlist_track < 1:\n'
-        '            log.debug("skipping m3u write: playlist_track is None or < 1")\n'
-        '            return\n'
-        '        if len(playlist_file_lines) < playlist_track:\n'
-        '            playlist_file_lines.extend('
-    )
-    if old in content and "skipping m3u write: playlist_track" not in content:
-        file_path.write_text(content.replace(old, new), encoding="utf-8")
-        print("patched gamdl.downloader.downloader._update_playlist_file")
-    else:
-        print("playlist-track guard not needed")
-PY
+# N_m3u8DL-RE.
+#
+# Pinned by default so the build is reproducible and does not depend on the
+# GitHub API being reachable — a build that dies because api.github.com is
+# rate-limited, blocked by a corporate proxy, or simply down is not a build
+# anyone can rely on. The runtime updater moves this forward on first run, so the
+# pin is a floor rather than a ceiling. Set NM3U8DLRE_VERSION=latest to resolve
+# the newest release at build time instead.
+#
+# Either way the binary is executed before the image is accepted. v1 used
+# `|| true` here, which shipped images that started cleanly and then failed every
+# single download.
+ARG NM3U8DLRE_VERSION=pinned
+RUN set -eu; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64|amd64) \
+            pattern='linux-x64'; \
+            pinned='https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.2.1/N_m3u8DL-RE_v0.2.1_linux-x64_20240828.tar.gz' ;; \
+        aarch64|arm64) \
+            pattern='linux-arm64'; \
+            pinned='https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.2.2/N_m3u8DL-RE_v0.2.2_linux-arm64.tar.gz' ;; \
+        *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    if [ "$NM3U8DLRE_VERSION" = "latest" ]; then \
+        url="$(curl -fsSL --retry 3 --retry-delay 2 --max-time 60 \
+               https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest \
+               | grep -Eo 'https://[^"]+\.tar\.gz' | grep -F "$pattern" | head -n1)"; \
+        if [ -z "$url" ]; then \
+            echo "could not resolve the latest N_m3u8DL-RE for $arch" >&2; exit 1; \
+        fi; \
+    elif [ "$NM3U8DLRE_VERSION" = "pinned" ]; then \
+        url="$pinned"; \
+    else \
+        url="https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v${NM3U8DLRE_VERSION}/N_m3u8DL-RE_v${NM3U8DLRE_VERSION}_${pattern}.tar.gz"; \
+    fi; \
+    echo "Fetching $url"; \
+    curl -fsSL --retry 3 --retry-delay 2 --max-time 300 "$url" -o /tmp/re.tar.gz; \
+    mkdir -p /tmp/re && tar -xzf /tmp/re.tar.gz -C /tmp/re; \
+    binary="$(find /tmp/re -type f -name 'N_m3u8DL-RE' | head -n1)"; \
+    if [ -z "$binary" ]; then echo "N_m3u8DL-RE missing from the archive" >&2; exit 1; fi; \
+    install -m 0755 "$binary" /opt/N_m3u8DL-RE; \
+    rm -rf /tmp/re /tmp/re.tar.gz; \
+    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 /opt/N_m3u8DL-RE --version >/dev/null 2>&1 \
+      || DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 /opt/N_m3u8DL-RE --help >/dev/null 2>&1 \
+      || { echo "the downloaded N_m3u8DL-RE does not run" >&2; exit 1; }
 
-# Install N_m3u8DL-RE
-# We verify architecture to download the correct binary
-RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then \
-        RE_URL="https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.2.1/N_m3u8DL-RE_v0.2.1_linux-x64_20240828.tar.gz"; \
-        curl -fL -o /tmp/N_m3u8DL-RE.tar.gz "$RE_URL" || true; \
-    elif [ "$ARCH" = "aarch64" ]; then \
-        RE_URL="https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.2.2/N_m3u8DL-RE_v0.2.2_linux-arm64.tar.gz"; \
-        curl -fL -o /tmp/N_m3u8DL-RE.tar.gz "$RE_URL" || true; \
-    fi && \
-    if [ -f /tmp/N_m3u8DL-RE.tar.gz ]; then \
-        tar -xzf /tmp/N_m3u8DL-RE.tar.gz -C /tmp && \
-        find /tmp -name "N_m3u8DL-RE" -type f -exec mv {} /usr/local/bin/N_m3u8DL-RE \; && \
-        chmod +x /usr/local/bin/N_m3u8DL-RE; \
-    fi && \
-    rm -rf /tmp/N_m3u8DL-RE.tar.gz /tmp/N_m3u8DL-RE*
+# --------------------------------------------------------------------------- #
+# Stage 2 — runtime
+# --------------------------------------------------------------------------- #
+FROM python:3.12-slim
 
-# Setup directories
+LABEL org.opencontainers.image.title="gamdl-downloader" \
+      org.opencontainers.image.description="Scheduled Apple Music playlist sync built on gamdl" \
+      org.opencontainers.image.source="https://github.com/thekozugroup/Gamdldocker" \
+      org.opencontainers.image.licenses="MIT"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        ca-certificates \
+        curl \
+        gosu \
+        procps \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/N_m3u8DL-RE /usr/local/bin/N_m3u8DL-RE
+COPY --from=builder /opt/gamdl-baseline /app/.gamdl-baseline
+
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    CONFIG_DIR=/config \
+    OUTPUT_DIR=/data/music \
+    TEMP_PATH=/data/temp \
+    COOKIES_PATH=/config/cookies.txt \
+    NM3U8DLRE_PATH=/usr/local/bin/N_m3u8DL-RE \
+    DOWNLOAD_MODE=nm3u8dlre \
+    FREQUENCY=3600 \
+    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+
 WORKDIR /app
 RUN mkdir -p /config /data/music /data/temp
 
-# Copy scripts
 COPY scripts/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# Environment variables defaults
-ENV FREQUENCY="3600"
-ENV COOKIES_PATH="/config/cookies.txt"
-ENV OUTPUT_DIR="/data/music"
-ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT="1"
+# A file the daemon refreshes as it works, so the check proves progress rather
+# than merely proving a process exists.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import json,sys,time; \
+b=json.load(open('/config/.downloader-heartbeat')); \
+sys.exit(0 if time.time()-b['ts'] < 900 else 1)" || exit 1
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+# tini reaps the zombies that ffmpeg and N_m3u8DL-RE leave behind and forwards
+# signals, so `docker stop` is clean instead of a 10-second timeout and a kill.
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
+CMD ["run"]

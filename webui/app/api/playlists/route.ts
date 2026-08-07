@@ -1,351 +1,132 @@
 import { NextResponse } from 'next/server'
-import fs from 'fs/promises'
-import path from 'path'
+import { canonicalKey, fetchPlaylistMetadata, isPlaylistUrl, normalizeUrl } from '@/lib/apple-music'
+import { requestSync } from '@/lib/control'
+import { jsonWithEtag } from '@/lib/etag'
+import { readSettings } from '@/lib/settings'
+import {
+  addPlaylistUrl,
+  buildPlaylistViews,
+  removePlaylistUrl,
+  removeStatusEntry,
+  writeNameCacheEntry,
+} from '@/lib/store'
 
-const CONFIG_DIR = process.env.CONFIG_DIR || '/config'
-const PLAYLISTS_FILE = path.join(CONFIG_DIR, 'playlists.txt')
-const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json')
-const STATUS_FILE = path.join(CONFIG_DIR, 'playlist-status.json')
-const NAME_CACHE_FILE = path.join(CONFIG_DIR, 'playlist-name-cache.json')
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-type PlaylistStatus = 'idle' | 'running' | 'complete' | 'failed'
-
-interface StatusEntry {
-  status?: PlaylistStatus
-  lastDownloaded?: string | null
-  songCount?: number
-  startedAt?: string | null
-  failedAt?: string | null
-  playlistFile?: string | null
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
-interface M3uStat {
-  fileName: string
-  key: string
-  songCount: number
-  mtime: string | null
-  displayName: string | null
-}
-
-interface CacheEntry {
-  name?: string
-  songCount?: number
-}
-
-function normalizeKey(value: string): string {
-  return value.toLowerCase().normalize('NFKC').replace(/[\s\-_]/g, '')
-}
-
-function safeDecode(value: string): string {
+export async function GET(request: Request) {
   try {
-    return decodeURIComponent(value)
-  } catch {
-    return value
-  }
-}
-
-async function getPlaylistM3uDir(): Promise<string> {
-  const raw = await fs.readFile(SETTINGS_FILE, 'utf-8').catch(() => '')
-  if (!raw) return '/data/music/playlists'
-  try {
-    const parsed = JSON.parse(raw)
-    return parsed.playlistM3uDir || '/data/music/playlists'
-  } catch {
-    return '/data/music/playlists'
-  }
-}
-
-async function readStatusMap(): Promise<Record<string, StatusEntry>> {
-  const raw = await fs.readFile(STATUS_FILE, 'utf-8').catch(() => '')
-  if (!raw) return {}
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return {}
-  }
-}
-
-async function readNameCache(): Promise<Record<string, CacheEntry>> {
-  const raw = await fs.readFile(NAME_CACHE_FILE, 'utf-8').catch(() => '')
-  if (!raw) return {}
-  try {
-    const parsed = JSON.parse(raw)
-    const normalized: Record<string, CacheEntry> = {}
-    for (const [key, value] of Object.entries(parsed || {})) {
-      if (typeof value === 'string') {
-        normalized[key] = { name: value }
-      } else if (value && typeof value === 'object') {
-        const entry = value as CacheEntry
-        normalized[key] = {
-          name: typeof entry.name === 'string' ? entry.name : undefined,
-          songCount: Number.isFinite(Number(entry.songCount)) ? Number(entry.songCount) : undefined,
-        }
-      }
-    }
-    return normalized
-  } catch {
-    return {}
-  }
-}
-
-async function writeNameCache(cache: Record<string, CacheEntry>) {
-  await fs.mkdir(CONFIG_DIR, { recursive: true })
-  await fs.writeFile(NAME_CACHE_FILE, JSON.stringify(cache, null, 2), 'utf-8')
-}
-
-async function buildM3uStats(playlistM3uDir: string): Promise<M3uStat[]> {
-  const files = await fs.readdir(playlistM3uDir).catch(() => [])
-  const m3uFiles = files.filter((file) => file.endsWith('.m3u') || file.endsWith('.m3u8'))
-
-  const stats = await Promise.all(
-    m3uFiles.map(async (fileName) => {
-      const filePath = path.join(playlistM3uDir, fileName)
-      const content = await fs.readFile(filePath, 'utf-8').catch(() => '')
-      const fileStats = await fs.stat(filePath).catch(() => null)
-      const songCount = content
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith('#')).length
-
-      const playlistTag = content
-        .split('\n')
-        .map((line) => line.trim())
-        .find((line) => line.toUpperCase().startsWith('#PLAYLIST:'))
-
-      const displayName = playlistTag
-        ? playlistTag.slice('#PLAYLIST:'.length).trim()
-        : safeDecode(fileName.replace(/\.m3u8?$/i, '')).trim()
-
-      return {
-        fileName,
-        key: normalizeKey(fileName.replace(/\.m3u8?$/i, '')),
-        songCount,
-        mtime: fileStats?.mtime?.toISOString?.() || null,
-        displayName: displayName || null,
-      }
-    })
-  )
-
-  return stats
-}
-
-function needsResolvedName(name: string) {
-  const normalized = name.trim().toLowerCase()
-  return !normalized || normalized === 'unknown playlist' || normalized.startsWith('pl.u ')
-}
-
-function sanitizePlaylistName(name: string): string {
-  return name
-    .normalize('NFC')
-    .replace(/\s*[|-]\s*Apple Music.*$/i, '')
-    .replace(/\s+by\s+.*$/i, '')
-    .replace(/^m\s*-\s*/i, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-async function fetchPlaylistMetadataFromWeb(url: string): Promise<CacheEntry> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 5000)
-  try {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      },
-      signal: controller.signal,
-      cache: 'no-store',
-    })
-    if (!response.ok) return {}
-
-    const html = await response.text()
-    const ogTitle = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i)?.[1]
-    const titleTag = html.match(/<title>([^<]+)<\/title>/i)?.[1]
-    const candidate = sanitizePlaylistName(ogTitle || titleTag || '')
-    const trackCountRaw = html.match(/"trackCount"\s*:\s*(\d{1,6})/i)?.[1]
-    const songCount = trackCountRaw ? Number(trackCountRaw) : undefined
-    return {
-      name: candidate && !/^pl\.u[-\s]/i.test(candidate) ? candidate : undefined,
-      songCount: Number.isFinite(songCount) ? songCount : undefined,
-    }
-  } catch {
-    return {}
-  } finally {
-    clearTimeout(timeout)
-  }
-}
-
-export async function GET() {
-  try {
-    const [content, statusMap, playlistM3uDir, nameCache] = await Promise.all([
-      fs.readFile(PLAYLISTS_FILE, 'utf-8').catch(() => ''),
-      readStatusMap(),
-      getPlaylistM3uDir(),
-      readNameCache(),
-    ])
-
-    const lines = content.split('\n').filter((line) => line.trim() && !line.startsWith('#'))
-    const m3uStats = await buildM3uStats(playlistM3uDir)
-
-    const playlists = lines.map((line, index) => {
-      const url = line.trim()
-      const extractedName = sanitizePlaylistName(extractPlaylistName(url))
-      const cacheEntry = nameCache[url] || {}
-      const cachedName = sanitizePlaylistName(cacheEntry.name || '')
-      const name = cachedName || extractedName
-      const lookupKey = normalizeKey(name)
-      const statusEntry = statusMap[url] || {}
-      const statusFileBase = (statusEntry.playlistFile || '').split('/').pop() || ''
-
-      const matched =
-        m3uStats.find((entry) => statusFileBase && entry.fileName === statusFileBase) ||
-        m3uStats.find((entry) => entry.key.includes(lookupKey) || lookupKey.includes(entry.key)) ||
-        null
-
-      return {
-        id: index,
-        url,
-        name: sanitizePlaylistName(matched?.displayName || name),
-        active: true,
-        songCount: Number(statusEntry.songCount ?? cacheEntry.songCount ?? matched?.songCount ?? 0),
-        lastDownloaded: statusEntry.lastDownloaded || matched?.mtime || null,
-        status: statusEntry.status || 'idle',
-        startedAt: statusEntry.startedAt || null,
-        failedAt: statusEntry.failedAt || null,
-      }
-    })
-
-    const unresolved = playlists.filter((playlist) => needsResolvedName(playlist.name) || (playlist.songCount || 0) === 0)
-    if (unresolved.length > 0) {
-      let cacheUpdated = false
-      await Promise.all(
-        unresolved.map(async (playlist) => {
-          const fetched = await fetchPlaylistMetadataFromWeb(playlist.url)
-          const currentCache = nameCache[playlist.url] || {}
-          const merged: CacheEntry = {
-            name: fetched.name || currentCache.name,
-            songCount: fetched.songCount ?? currentCache.songCount,
-          }
-
-          if (merged.name && needsResolvedName(playlist.name)) {
-            playlist.name = sanitizePlaylistName(merged.name)
-          }
-          if ((playlist.songCount || 0) === 0 && Number.isFinite(Number(merged.songCount))) {
-            playlist.songCount = Number(merged.songCount)
-          }
-
-          if (merged.name || Number.isFinite(Number(merged.songCount))) {
-            nameCache[playlist.url] = merged
-            cacheUpdated = true
-          }
-        })
-      )
-      if (cacheUpdated) {
-        await writeNameCache(nameCache)
-      }
-    }
-
-    return NextResponse.json({ playlists })
+    const settings = await readSettings()
+    const playlists = await buildPlaylistViews(settings.playlistM3uDir)
+    return jsonWithEtag(request, { playlists })
   } catch (error) {
-    return NextResponse.json({ playlists: [] }, { status: 500 })
+    return NextResponse.json(
+      { error: 'Failed to read playlists', detail: errorDetail(error) },
+      { status: 500 }
+    )
   }
 }
 
 export async function POST(request: Request) {
+  let url: string
   try {
-    const { url } = await request.json()
-    
-    if (!url || !url.includes('music.apple.com')) {
+    const body = await request.json()
+    // Store the normalized form so playlists.txt, the status file and the name
+    // cache all key on the same string the daemon will see.
+    url = normalizeUrl(typeof body?.url === 'string' ? body.url : '')
+  } catch (error) {
+    return NextResponse.json(
+      { error: 'Request body must be JSON', detail: errorDetail(error) },
+      { status: 400 }
+    )
+  }
+
+  if (!isPlaylistUrl(url)) {
+    return NextResponse.json(
+      {
+        error: 'Not an Apple Music playlist URL',
+        detail: 'Expected https://music.apple.com/<storefront>/playlist/<name>/pl.<id> — album, song and artist links cannot be synced.',
+      },
+      { status: 400 }
+    )
+  }
+
+  try {
+    const result = await addPlaylistUrl(url)
+    if (!result.added) {
       return NextResponse.json(
-        { error: 'Invalid Apple Music URL' },
-        { status: 400 }
-      )
-    }
-    
-    let content = await fs.readFile(PLAYLISTS_FILE, 'utf-8').catch(() => '')
-    
-    if (content.includes(url)) {
-      return NextResponse.json(
-        { error: 'Playlist already exists' },
+        { error: 'Playlist already exists', detail: `Already configured as ${result.duplicate}`, key: canonicalKey(url) },
         { status: 409 }
       )
     }
-    
-    content = content.trim() + '\n' + url + '\n'
-    await fs.writeFile(PLAYLISTS_FILE, content, 'utf-8')
-
-    return NextResponse.json({ success: true, url })
   } catch (error) {
     return NextResponse.json(
-      { error: 'Failed to add playlist' },
+      { error: 'Failed to write playlists.txt', detail: errorDetail(error) },
       { status: 500 }
     )
   }
+
+  // Resolve the Apple title exactly once, at add time. Failure is non-fatal:
+  // the slug name stands in until the daemon records the real one.
+  let name: string | undefined
+  try {
+    const meta = await fetchPlaylistMetadata(url, 5000)
+    if (meta.name || meta.songCount !== undefined) {
+      await writeNameCacheEntry(url, meta)
+      name = meta.name
+    }
+  } catch {
+    // ignored — see above
+  }
+
+  try {
+    await requestSync([url])
+  } catch (error) {
+    // The playlist is saved; it will sync on the next scheduled cycle anyway.
+    return NextResponse.json(
+      { url: normalizeUrl(url), name: name || null, syncRequested: false, detail: errorDetail(error) },
+      { status: 201 }
+    )
+  }
+
+  return NextResponse.json({ url: normalizeUrl(url), name: name || null, syncRequested: true }, { status: 201 })
 }
 
 export async function DELETE(request: Request) {
+  let url: string
   try {
-    const { url } = await request.json()
-    
-    let content = await fs.readFile(PLAYLISTS_FILE, 'utf-8').catch(() => '')
-    const lines = content.split('\n').filter((line) => line.trim() !== url)
-
-    await fs.writeFile(PLAYLISTS_FILE, lines.join('\n') + '\n', 'utf-8')
-
-    const statusMap = await readStatusMap()
-    if (statusMap[url]) {
-      delete statusMap[url]
-      await fs.writeFile(STATUS_FILE, JSON.stringify(statusMap, null, 2), 'utf-8')
-    }
-    
-    return NextResponse.json({ success: true })
+    const body = await request.json()
+    url = typeof body?.url === 'string' ? body.url.trim() : ''
   } catch (error) {
     return NextResponse.json(
-      { error: 'Failed to remove playlist' },
+      { error: 'Request body must be JSON', detail: errorDetail(error) },
+      { status: 400 }
+    )
+  }
+  if (!url) {
+    return NextResponse.json({ error: 'url is required', detail: 'Pass {"url": "..."}' }, { status: 400 })
+  }
+
+  try {
+    const { removed } = await removePlaylistUrl(url)
+    if (!removed.length) {
+      return NextResponse.json(
+        { error: 'Playlist not found', detail: `${url} is not in playlists.txt` },
+        { status: 404 }
+      )
+    }
+    for (const entry of removed) {
+      await removeStatusEntry(entry)
+    }
+    return NextResponse.json({ removed })
+  } catch (error) {
+    return NextResponse.json(
+      { error: 'Failed to remove playlist', detail: errorDetail(error) },
       { status: 500 }
     )
   }
-}
-
-function isAsciiSlug(value: string): boolean {
-  // Returns true if the string only contains ASCII characters (URL slug)
-  return /^[\x00-\x7F]+$/.test(value)
-}
-
-function extractPlaylistName(url: string): string {
-  try {
-    const parsed = new URL(url)
-    const parts = parsed.pathname.split('/').filter(Boolean)
-    const playlistIndex = parts.findIndex((segment) => segment === 'playlist')
-    const slugPart = playlistIndex >= 0 ? parts[playlistIndex + 1] : ''
-    if (slugPart) {
-      const decoded = safeDecode(slugPart).normalize('NFC')
-      // Only dehyphenate ASCII slugs; preserve Unicode/emoji names as-is
-      if (isAsciiSlug(decoded)) {
-        return decoded
-          .replace(/^m-/i, '')
-          .replace(/-/g, ' ')
-          .replace(/\+/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim()
-      }
-      // Non-ASCII: keep the original characters intact
-      return decoded.replace(/\s+/g, ' ').trim()
-    }
-  } catch {
-    // fallback below
-  }
-
-  const match = url.match(/playlist\/([^/?#]+)/)
-  if (!match) return 'Unknown Playlist'
-  const decoded = safeDecode(match[1]).normalize('NFC')
-  if (isAsciiSlug(decoded)) {
-    return decoded
-      .replace(/^m-/i, '')
-      .replace(/-/g, ' ')
-      .replace(/\+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim() || 'Unknown Playlist'
-  }
-  return decoded.replace(/\s+/g, ' ').trim() || 'Unknown Playlist'
 }

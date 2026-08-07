@@ -1,0 +1,69 @@
+name: Bug report
+description: Something in the downloader or the web UI isn't working as expected.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Logs live at
+        `/config/logs/downloader.log` inside the downloader container, and
+        `/config/.downloader-heartbeat` shows whether the sync loop is alive.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: >
+        Paste from `/config/logs/downloader.log`, or the web UI's log view.
+        Redact cookies, tokens, and playlist URLs you don't want public.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Image tag / version
+      placeholder: e.g. ghcr.io/thekozugroup/gamdl-downloader:2.1.0, or a commit SHA
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Where does this happen?
+      options:
+        - Downloader (sync loop / gamdl)
+        - Web UI
+        - Docker / compose / deployment
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Relevant settings.json (redacted)
+      description: Only the fields that seem relevant — no need to paste cookies.
+      render: json
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      value: |
+        - OS / platform:
+        - Docker version:
+        - `docker compose version`:

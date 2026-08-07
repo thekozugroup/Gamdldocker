@@ -12,6 +12,8 @@ webui/node_modules/
 # Next.js build output
 webui/.next/
 webui/out/
+*.tsbuildinfo
+webui/.eslintrc.json
 
 # Downloaded files
 downloads/
@@ -39,8 +41,37 @@ config/music.apple.com_cookies.txt
 config/playlist-name-cache.json
 config/playlist-status.json
 config/playlist-overrides.json
+# Live config — the .example files are the tracked seeds.
+config/settings.json
+config/playlists.txt
 !config/playlist-overrides.json.example
 music.apple.com_cookies.txt
 
 # Runtime data
 .memory/
+
+# Python downloader
+downloader/.venv
+downloader/.pytest_cache
+downloader/**/__pycache__
+downloader/.ruff_cache
+downloader/*.egg-info/
+downloader/**/*.egg-info/
+.coverage
+htmlcov/
+
+# Runtime state under /config — written by the daemon and the web UI, not
+# meant to be committed (see downloader/gamdl_sync/daemon.py:Paths)
+config/logs/
+config/control/
+config/.downloader-heartbeat
+config/.update-state.json
+config/.migrations.json
+config/webui.env
+
+# Local sandbox / CI test artifacts, not part of the shipped image build
+Dockerfile.citest
+.ccr-ca.crt
+
+# Advisory-lock sidecars from state.py's atomic-write protocol
+config/**/*.lock

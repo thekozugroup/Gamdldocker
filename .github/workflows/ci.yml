@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # gamdl_sync only ever shells out to the `gamdl` binary (see gamdl_runner.py) —
+  # it never `import`s the gamdl package — so the whole point of this job is to
+  # prove that stays true. We install the package with --no-deps and add the
+  # dev/runtime extras by hand instead of letting `pip install .[dev]` pull
+  # gamdl in; if a future change adds a module-level `import gamdl`, this job
+  # fails with an ImportError instead of the coupling going unnoticed.
+  python:
+    name: Python (downloader)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: downloader/pyproject.toml
+
+      - name: Install downloader without gamdl
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-deps -e downloader
+          pip install "pytest>=8.0" "pytest-cov>=5.0" "ruff>=0.6" "mutagen>=1.45"
+
+      - name: Confirm gamdl is not installed
+        run: |
+          if python -c "import gamdl" 2>/dev/null; then
+            echo "gamdl is importable — the lazy-import contract no longer holds" >&2
+            exit 1
+          fi
+
+      - name: ruff check
+        run: ruff check downloader
+
+      - name: ruff format --check
+        run: ruff format --check downloader
+
+      - name: pytest
+        run: >
+          pytest downloader/tests -q
+          --cov=gamdl_sync --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloader-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  webui:
+    name: WebUI (Next.js)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: |
+          # `next lint` scaffolds an .eslintrc.json on its first run instead of
+          # linting, and does so interactively unless --strict is given. Do the
+          # scaffold step ourselves (only when no config exists yet — this
+          # writes into the CI checkout, never back to the repo) so `npm run
+          # lint` isn't left stuck behind a prompt on a runner with no TTY.
+          if ! compgen -G '.eslintrc*' >/dev/null && ! compgen -G 'eslint.config.*' >/dev/null; then
+            npx next lint --strict
+          fi
+          npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        if: hashFiles('webui/tests/**') != ''
+        run: npm test --if-present
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest runners ship shellcheck preinstalled, so this needs no
+      # third-party action. The entrypoint is POSIX sh (`set -eu`, no
+      # bash-only syntax), so it's checked as `sh` rather than shellcheck's
+      # bash default — otherwise it would flag constructs that are perfectly
+      # valid POSIX sh.
+      - name: shellcheck scripts/*.sh webui/*.sh
+        run: shellcheck --shell=sh --severity=style scripts/*.sh
+
+  docker:
+    name: Docker build (${{ matrix.image }}, smoke test)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: gamdl-downloader
+            context: .
+            file: Dockerfile
+          - image: gamdl-webui
+            context: ./webui
+            file: webui/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.image }} (linux/amd64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          push: false
+          tags: ${{ matrix.image }}:ci
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

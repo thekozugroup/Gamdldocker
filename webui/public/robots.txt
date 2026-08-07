@@ -1,0 +1,5 @@
+# This is a private, self-hosted control panel. Nothing here should ever be
+# indexed — and if a crawler is reading this, the UI is more exposed than it
+# should be. See BIND_HOST and WEBUI_AUTH_TOKEN in .env.example.
+User-agent: *
+Disallow: /
