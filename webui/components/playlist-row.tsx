@@ -57,17 +57,13 @@ export function PlaylistRow({
         busy && 'pointer-events-none opacity-50',
       )}
     >
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className={cn('flex size-5 shrink-0 items-center justify-center', status.tone)}>
-            <StatusIcon className={cn('size-4', status.spin && 'animate-spin')} aria-hidden="true" />
-            <span className="sr-only">{status.label}</span>
-          </span>
-        </TooltipTrigger>
-        <TooltipContent side="right">
-          {playlist.lastError ? `${status.label} — ${playlist.lastError}` : status.label}
-        </TooltipContent>
-      </Tooltip>
+      <span
+        className={cn('flex size-5 shrink-0 items-center justify-center', status.tone)}
+        title={status.label}
+      >
+        <StatusIcon className={cn('size-4', status.spin && 'animate-spin')} aria-hidden="true" />
+        <span className="sr-only">{status.label}</span>
+      </span>
 
       <div className="min-w-0 flex-1">
         <p className="truncate text-callout font-medium leading-snug">{playlist.name}</p>
@@ -106,12 +102,24 @@ export function PlaylistRow({
                 <span> · {formatRelative(playlist.lastDownloaded)}</span>
               ) : null}
             </p>
-            <p
-              className="hidden truncate font-mono text-caption text-muted-foreground md:block"
-              title={playlist.url}
-            >
-              {shortenUrl(playlist.url)}
-            </p>
+            {playlist.lastError ? (
+              <p
+                className={cn(
+                  'hidden truncate text-caption md:block',
+                  playlist.status === 'failed' ? 'text-destructive' : 'text-warning',
+                )}
+                title={playlist.lastError}
+              >
+                {playlist.lastError}
+              </p>
+            ) : (
+              <p
+                className="hidden truncate font-mono text-caption text-muted-foreground md:block"
+                title={playlist.url}
+              >
+                {shortenUrl(playlist.url)}
+              </p>
+            )}
           </>
         )}
       </div>

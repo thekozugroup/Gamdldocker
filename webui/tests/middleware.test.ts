@@ -19,6 +19,7 @@ const STUB = `const NextResponse = {
   redirect: (url) => ({ status: 307, body: null, location: String(url), headers: {}, cookies: { set: (name, value) => { (globalThis).__setCookie = { name, value } } } }),
 }
 type NextRequest = {
+  method: string
   headers: Headers
   nextUrl: URL & { clone(): URL }
   cookies: { get(name: string): { value: string } | undefined }
@@ -45,6 +46,7 @@ function requestFor(
   // path needs it.
   const nextUrl = Object.assign(parsed, { clone: () => Object.assign(new URL(url), { clone: () => new URL(url) }) })
   return {
+    method: 'GET',
     headers: new Headers(headers),
     nextUrl,
     cookies: {
@@ -211,12 +213,53 @@ test('the sign-in page itself is reachable while signed out', () => {
   assert.equal(pattern.test('/sign-in'), false)
 })
 
-test('arriving with ?token= sets a cookie and strips the secret from the URL', async () => {
+test('?token= does not authenticate an ordinary page request', async () => {
+  // Query strings leak into proxy logs, browser history and Referer headers.
+  // The sign-in page covers this case without ever putting the secret in a URL.
   process.env.WEBUI_AUTH_TOKEN = 'sekret'
-  const response = await middleware(
-    requestFor('http://host/?token=sekret', { accept: 'text/html' }),
-  )
+  const response = await middleware(requestFor('http://host/?token=sekret', { accept: 'text/html' }))
   assert.equal(response.status, 307)
-  assert.doesNotMatch(response.location, /token=/)
-  assert.deepEqual(globalThis.__setCookie, { name: 'gamdl_session', value: 'sekret' })
+  assert.match(response.location, /\/sign-in/)
+})
+
+test('?token= does not authenticate an ordinary API request', async () => {
+  process.env.WEBUI_AUTH_TOKEN = 'sekret'
+  const response = await middleware(requestFor('http://host/api/status?token=sekret'))
+  assert.equal(response.status, 401)
+})
+
+test('?token= is accepted only on the log stream, which cannot send headers', async () => {
+  process.env.WEBUI_AUTH_TOKEN = 'sekret'
+  const response = await middleware(requestFor('http://host/api/logs/stream?token=sekret'))
+  assert.equal(response.status, 200)
+})
+
+test('a cross-site POST is refused before authentication is even considered', async () => {
+  // The session cookie is attached automatically, so without this any page the
+  // user visits could POST to /api/settings on their behalf.
+  delete process.env.WEBUI_AUTH_TOKEN
+  const response = await middleware({
+    ...requestFor('http://host/api/settings'),
+    method: 'POST',
+    headers: new Headers({ 'sec-fetch-site': 'cross-site' }),
+  })
+  assert.equal(response.status, 403)
+})
+
+test('a same-origin POST is allowed through', async () => {
+  delete process.env.WEBUI_AUTH_TOKEN
+  const response = await middleware({
+    ...requestFor('http://host/api/settings'),
+    method: 'POST',
+    headers: new Headers({ 'sec-fetch-site': 'same-origin' }),
+  })
+  assert.equal(response.status, 200)
+})
+
+test('a non-browser client that sends neither signal is allowed through', async () => {
+  // curl and scripts send no Origin and no Sec-Fetch-Site; refusing them would
+  // break every automation against this API.
+  delete process.env.WEBUI_AUTH_TOKEN
+  const response = await middleware({ ...requestFor('http://host/api/sync'), method: 'POST' })
+  assert.equal(response.status, 200)
 })

@@ -30,10 +30,13 @@ const CardHeader = React.forwardRef<
 CardHeader.displayName = "CardHeader"
 
 const CardTitle = React.forwardRef<
-  HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
->(({ className, ...props }, ref) => (
-  <div
+  HTMLHeadingElement,
+  React.HTMLAttributes<HTMLHeadingElement> & { as?: "h2" | "h3" | "div" }
+>(({ className, as: Comp = "h2", ...props }, ref) => (
+  // An <h2> by default. Rendering every card heading as a <div> left each page
+  // with a single h1 and nothing under it, so a screen reader had no outline to
+  // navigate the page by.
+  <Comp
     ref={ref}
     className={cn("font-semibold leading-none tracking-tight", className)}
     {...props}

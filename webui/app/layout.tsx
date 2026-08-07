@@ -39,6 +39,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ThemeScript />
       </head>
       <body className="font-sans">
+        {/*
+          The first tab stop on every route was the Library nav link, six or
+          seven presses from the content.
+        */}
+        <a
+          href="#content"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-primary focus:px-4 focus:py-2 focus:text-primary-foreground"
+        >
+          Skip to content
+        </a>
         <AppShell defaultSidebarOpen={sidebarOpen}>{children}</AppShell>
         <Toaster />
       </body>

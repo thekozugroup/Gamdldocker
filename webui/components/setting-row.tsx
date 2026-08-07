@@ -48,10 +48,19 @@ export function SettingRow({
   label: string
   description?: React.ReactNode
   htmlFor?: string
-  children: React.ReactNode
+  /**
+   * Either a node, or a function given the generated ids. Callers that render
+   * their own control take the function form so the label and description
+   * actually attach to it — a bare `htmlFor` that no field claims produced a
+   * label pointing at nothing and an input with no accessible name.
+   */
+  children: React.ReactNode | ((ids: { id: string; describedBy?: string }) => React.ReactNode)
   /** Put the control on its own line — for wide inputs like file paths. */
   stacked?: boolean
 }) {
+  const generatedId = React.useId()
+  const descriptionId = React.useId()
+  const id = htmlFor ?? generatedId
   return (
     <div
       className={cn(
@@ -60,14 +69,20 @@ export function SettingRow({
       )}
     >
       <div className="min-w-0 space-y-0.5">
-        <label htmlFor={htmlFor} className="block text-callout font-medium">
+        <label htmlFor={id} className="block text-callout font-medium">
           {label}
         </label>
         {description ? (
-          <p className="max-w-xl text-footnote text-muted-foreground">{description}</p>
+          <p id={descriptionId} className="max-w-xl text-footnote text-muted-foreground">
+            {description}
+          </p>
         ) : null}
       </div>
-      <div className={cn('shrink-0', stacked && 'w-full')}>{children}</div>
+      <div className={cn('shrink-0', stacked && 'w-full')}>
+        {typeof children === 'function'
+          ? children({ id, describedBy: description ? descriptionId : undefined })
+          : children}
+      </div>
     </div>
   )
 }
@@ -102,42 +117,87 @@ export function SegmentedControl<T extends string>({
   options,
   onChange,
   columns,
+  describedBy,
 }: {
   label: string
   value: T
   options: { value: T; label: string; hint?: string }[]
   onChange: (value: T) => void
   columns?: boolean
+  describedBy?: string
 }) {
+  const groupId = React.useId()
+  const refs = React.useRef<(HTMLButtonElement | null)[]>([])
+  const selectedIndex = Math.max(
+    0,
+    options.findIndex((option) => option.value === value),
+  )
+
+  /*
+   * The APG radiogroup contract: one tab stop for the whole group, arrows to
+   * move between options. Declaring role="radiogroup" without it was worse than
+   * using plain buttons — it promised a keyboard model that did not exist, and
+   * every option was its own tab stop.
+   */
+  const onKeyDown = (event: React.KeyboardEvent, index: number) => {
+    const keys = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End']
+    if (!keys.includes(event.key)) return
+    event.preventDefault()
+    const forward = event.key === 'ArrowRight' || event.key === 'ArrowDown'
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? options.length - 1
+          : (index + (forward ? 1 : -1) + options.length) % options.length
+    onChange(options[next].value)
+    refs.current[next]?.focus()
+  }
+
   return (
     <div
       role="radiogroup"
       aria-label={label}
+      aria-describedby={describedBy}
       className={cn(
         'inline-flex gap-1 rounded-md bg-muted p-1',
         columns ? 'flex w-full flex-col' : 'flex-wrap',
       )}
     >
-      {options.map((option) => {
+      {options.map((option, index) => {
         const selected = option.value === value
+        const hintId = option.hint ? `${groupId}-${index}` : undefined
         return (
-          <button
-            key={option.value}
-            type="button"
-            role="radio"
-            aria-checked={selected}
-            title={option.hint}
-            onClick={() => onChange(option.value)}
-            className={cn(
-              'rounded px-3 py-1.5 text-footnote font-medium transition-colors ease-hig',
-              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-              selected
-                ? 'bg-background text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground',
-            )}
-          >
-            {option.label}
-          </button>
+          <React.Fragment key={option.value}>
+            <button
+              ref={(node) => {
+                refs.current[index] = node
+              }}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              aria-describedby={hintId}
+              // Roving tabindex: the group is one stop, arrows move within it.
+              tabIndex={index === selectedIndex ? 0 : -1}
+              onKeyDown={(event) => onKeyDown(event, index)}
+              onClick={() => onChange(option.value)}
+              className={cn(
+                'min-h-9 rounded px-3 py-1.5 text-footnote font-medium transition-colors ease-hig',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                selected
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              {option.label}
+            </button>
+            {/* title= is invisible to keyboard and screen-reader users. */}
+            {hintId ? (
+              <span id={hintId} className="sr-only">
+                {option.hint}
+              </span>
+            ) : null}
+          </React.Fragment>
         )
       })}
     </div>

@@ -23,13 +23,48 @@ async function timingSafeEqual(a: string, b: string): Promise<boolean> {
 
 export const SESSION_COOKIE = 'gamdl_session'
 
+/** The only route allowed to authenticate with ?token= — EventSource cannot
+ *  set headers, and it is the one client that needs the escape hatch. */
+const STREAM_PATH = '/api/logs/stream'
+
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+/**
+ * Refuse state-changing requests that a third-party page initiated.
+ *
+ * Now that a session cookie exists, a browser attaches it automatically — so
+ * without this, any page the user visits could POST to /api/playlists or
+ * /api/settings on their behalf. `Sec-Fetch-Site` is the modern signal;
+ * `Origin` is the fallback for anything that does not send it.
+ */
+function isCrossSiteWrite(request: NextRequest): boolean {
+  if (!UNSAFE_METHODS.has(request.method)) return false
+
+  const fetchSite = request.headers.get('sec-fetch-site')
+  if (fetchSite) return fetchSite !== 'same-origin' && fetchSite !== 'none'
+
+  const origin = request.headers.get('origin')
+  if (!origin) return false // curl and other non-browser clients send neither
+  try {
+    return new URL(origin).host !== request.headers.get('host')
+  } catch {
+    return true
+  }
+}
+
 async function tokenAllows(request: NextRequest, token: string): Promise<boolean> {
   const header = request.headers.get('authorization') || ''
   if (header.toLowerCase().startsWith('bearer ')) {
     if (await timingSafeEqual(header.slice(7).trim(), token)) return true
   }
-  const query = request.nextUrl.searchParams.get('token')
-  if (query !== null && (await timingSafeEqual(query, token))) return true
+  // A query token is only honoured on the SSE endpoint, which is the one
+  // consumer that genuinely cannot send a header. Query strings end up in
+  // proxy logs, browser history and Referer headers, so accepting one
+  // everywhere would be handing the secret out for convenience.
+  if (request.nextUrl.pathname === STREAM_PATH) {
+    const query = request.nextUrl.searchParams.get('token')
+    if (query !== null && (await timingSafeEqual(query, token))) return true
+  }
   // A browser cannot attach an Authorization header to a document request, and
   // EventSource cannot attach one at all — so without a cookie, token auth
   // locked people out of their own UI with a JSON 401 and no way to sign in.
@@ -69,6 +104,16 @@ async function basicAllows(request: NextRequest, username: string, password: str
 }
 
 export async function middleware(request: NextRequest) {
+  if (isCrossSiteWrite(request)) {
+    return NextResponse.json(
+      {
+        error: 'Cross-site request blocked',
+        detail: 'State-changing requests must come from this origin.',
+      },
+      { status: 403 },
+    )
+  }
+
   const token = process.env.WEBUI_AUTH_TOKEN || ''
   const username = process.env.WEBUI_USERNAME || ''
   const password = process.env.WEBUI_PASSWORD || ''
@@ -76,28 +121,7 @@ export async function middleware(request: NextRequest) {
 
   if (!token && !basicConfigured) return NextResponse.next()
 
-  const query = request.nextUrl.searchParams.get('token')
-  const tokenOk = token ? await tokenAllows(request, token) : false
-
-  if (tokenOk) {
-    // Arriving with ?token=… exchanges it for a session cookie and drops the
-    // secret out of the address bar, so it stops leaking into history,
-    // bookmarks and Referer headers.
-    if (query !== null && wantsHtml(request)) {
-      const clean = request.nextUrl.clone()
-      clean.searchParams.delete('token')
-      const response = NextResponse.redirect(clean)
-      response.cookies.set(SESSION_COOKIE, token, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure: request.nextUrl.protocol === 'https:',
-        path: '/',
-        maxAge: 60 * 60 * 24 * 30,
-      })
-      return response
-    }
-    return NextResponse.next()
-  }
+  if (token && (await tokenAllows(request, token))) return NextResponse.next()
 
   if (basicConfigured && (await basicAllows(request, username, password))) return NextResponse.next()
 

@@ -18,13 +18,20 @@ import { formatCount, formatRelative } from '@/lib/format'
  */
 export function SetupChecklist({ snapshot }: { snapshot: StatusSnapshot }) {
   const issue = firstIssue(snapshot)
-  if (!issue) return null
 
+  // The wrapper is always present. A live region inserted into the DOM in the
+  // same mutation as its content is not announced — screen readers only report
+  // changes to regions that already existed.
   return (
-    <div
-      role="status"
-      className="frost frost-elevated flex flex-col gap-3 rounded-lg border border-warning/40 p-4 sm:flex-row sm:items-center"
-    >
+    <div role="status" aria-live="polite">
+      {issue ? <IssueBanner issue={issue} /> : null}
+    </div>
+  )
+}
+
+function IssueBanner({ issue }: { issue: Issue }) {
+  return (
+    <div className="frost frost-elevated flex flex-col gap-3 rounded-lg border border-warning/40 p-4 sm:flex-row sm:items-center">
       <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-warning/15 text-warning">
         {issue.severity === 'blocking' ? (
           <AlertCircle className="size-5" aria-hidden="true" />

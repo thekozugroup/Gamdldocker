@@ -281,7 +281,9 @@ def _safe_extract(archive: Path, destination: Path) -> None:
     with tarfile.open(archive, "r:gz") as tar:
         for member in tar.getmembers():
             target = (destination / member.name).resolve()
-            if not str(target).startswith(str(destination)):
+            # startswith alone would accept /tmp/re-evil for a destination of
+            # /tmp/re. relative_to enforces a real path boundary.
+            if target != destination and destination not in target.parents:
                 raise ValueError(f"refusing unsafe archive member: {member.name}")
             if member.issym() or member.islnk():
                 raise ValueError(f"refusing link member in archive: {member.name}")
