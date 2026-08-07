@@ -128,7 +128,6 @@ class Daemon:
         self._last_heartbeat = 0.0
         self._state = "starting"
         self._detail = ""
-        self._seen_lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -187,21 +186,27 @@ class Daemon:
             except Exception as exc:
                 log.warning("update check failed: %s", exc)
 
-            urls = load_playlist_urls(self.paths.playlists)
+            # `configured` is every playlist the user has; `targets` is the
+            # subset to sync now. They differ when the web UI asks for a scoped
+            # sync — which it does every time a playlist is added. Housekeeping
+            # must always reason about the full set: scoping it would treat the
+            # other playlists as though the user had deleted them.
+            configured = load_playlist_urls(self.paths.playlists)
+            targets = configured
             if self._scoped_urls:
-                scoped = [u for u in urls if u in self._scoped_urls]
+                scoped = [u for u in configured if u in self._scoped_urls]
                 if scoped:
-                    urls = scoped
+                    targets = scoped
                 self._scoped_urls = []
 
-            if not urls:
+            if not configured:
                 log.info("no playlists configured; waiting %ss", EMPTY_RETRY_SECONDS)
                 self._beat("idle-no-playlists")
                 self._sleep(EMPTY_RETRY_SECONDS)
                 continue
 
             self.cancel_event.clear()
-            self._run_cycle(settings, urls)
+            self._run_cycle(settings, configured, targets)
 
             if self.stop_event.is_set():
                 break
@@ -218,15 +223,26 @@ class Daemon:
     # A cycle
     # ------------------------------------------------------------------ #
 
-    def _run_cycle(self, settings: Settings, urls: list[str]) -> None:
+    def _run_cycle(
+        self, settings: Settings, configured: list[str], targets: list[str] | None = None
+    ) -> None:
+        """Sync ``targets`` (default: everything) out of the ``configured`` set.
+
+        Every step that decides what to *keep* — the status file, the name cache,
+        the playlist folder — is driven by ``configured``. Only the download loop
+        is driven by ``targets``.
+        """
         started = time.monotonic()
+        targets = configured if targets is None else targets
+        target_set = set(targets)
+
         m3u_dir = Path(settings.playlist_m3u_dir)
         m3u_dir.mkdir(parents=True, exist_ok=True)
         Path(settings.output_location).mkdir(parents=True, exist_ok=True)
         Path(settings.temp_path).mkdir(parents=True, exist_ok=True)
 
-        self.status.reset_to_idle(urls)
-        self.names.prune(urls)
+        self.status.reset_to_idle(configured)
+        self.names.prune(configured)
 
         overrides = self._read_overrides()
         name_cache = self.names.read()
@@ -235,24 +251,30 @@ class Daemon:
         # keeps the same suffix across restarts instead of flapping.
         seen: set[str] = {path.stem.casefold() for path in m3u_dir.glob("*.m3u*") if path.is_file()}
 
+        # Names are resolved for every configured playlist even on a scoped run:
+        # the collision suffixes depend on the whole set, and the orphan sweep
+        # needs to know which filenames are legitimately claimed.
         plan: list[tuple[str, str]] = []
-        for url in urls:
+        for url in configured:
             resolved, source = resolve_playlist_name(
                 url, overrides=overrides, name_cache=name_cache, safe=settings.safe_filenames
             )
-            with self._seen_lock:
-                # Its own current filename must not count as a collision.
-                seen.discard(resolved.casefold())
-                unique = uniquify(resolved, url, seen)
+            # Its own current filename must not count as a collision.
+            seen.discard(resolved.casefold())
+            unique = uniquify(resolved, url, seen)
             plan.append((url, unique))
             log.debug("resolved %s -> %r (via %s)", url, unique, source)
 
-        if settings.concurrency > 1 and len(plan) > 1:
-            log.info("syncing %d playlists (%d at a time)", len(plan), settings.concurrency)
+        work = [(url, name) for url, name in plan if url in target_set]
+        if len(work) != len(plan):
+            log.info("syncing %d of %d playlist(s) this cycle", len(work), len(plan))
+
+        if settings.concurrency > 1 and len(work) > 1:
+            log.info("syncing %d playlists (%d at a time)", len(work), settings.concurrency)
             with ThreadPoolExecutor(max_workers=settings.concurrency) as pool:
-                list(pool.map(lambda item: self._sync_guarded(settings, *item), plan))
+                list(pool.map(lambda item: self._sync_guarded(settings, *item), work))
         else:
-            for url, name in plan:
+            for url, name in work:
                 if self.stop_event.is_set() or self.cancel_event.is_set():
                     break
                 self._sync_guarded(settings, url, name)
