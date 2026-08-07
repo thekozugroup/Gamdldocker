@@ -185,3 +185,43 @@ def test_render_falls_back_to_the_filename_when_tags_are_missing(tmp_path: Path)
 def test_render_uses_lf_endings_only():
     entry = PlaylistEntry(relative_path="a.m4a", absolute_path=Path("a.m4a"), exists=True)
     assert "\r" not in render_m3u8([entry], "Mix")
+
+
+# --------------------------------------------------------------------------- #
+# m3u is line-oriented: nothing may break out of a directive
+# --------------------------------------------------------------------------- #
+
+
+def test_a_newline_in_a_tag_cannot_forge_an_entry(tmp_path: Path):
+    entry = PlaylistEntry(
+        relative_path="../A/1.m4a",
+        absolute_path=tmp_path / "A" / "1.m4a",
+        exists=True,
+        duration=100,
+        title="Song\n/etc/passwd",
+        artist="Artist",
+    )
+    text = render_m3u8([entry], "Mix")
+    # Exactly four: header, PLAYLIST, one EXTINF, one path. A fifth would mean
+    # the tag had escaped its directive.
+    lines = text.rstrip("\n").split("\n")
+    assert len(lines) == 4
+    assert lines[2] == "#EXTINF:100,Artist - Song /etc/passwd"
+    assert lines[3] == "../A/1.m4a"
+
+
+def test_a_newline_in_the_title_cannot_forge_an_entry():
+    text = render_m3u8([], "Mix\n../evil.m4a")
+    assert text.rstrip("\n").split("\n") == ["#EXTM3U", "#PLAYLIST:Mix ../evil.m4a"]
+
+
+def test_unicode_line_separators_are_flattened_too():
+    text = render_m3u8([], "Mix Other")
+    assert " " not in text
+    assert text.rstrip("\n").split("\n") == ["#EXTM3U", "#PLAYLIST:Mix Other"]
+
+
+def test_carriage_returns_are_flattened():
+    text = render_m3u8([], "Mix\r\nOther")
+    assert "\r" not in text
+    assert len(text.rstrip("\n").split("\n")) == 2

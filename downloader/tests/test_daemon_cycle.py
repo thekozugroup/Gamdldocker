@@ -51,7 +51,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     synced: list[str] = []
 
-    def fake_sync(_settings, url, name):
+    def fake_sync(_settings, url, name, title=""):
         synced.append(url)
         from gamdl_sync.daemon import SyncOutcome
 

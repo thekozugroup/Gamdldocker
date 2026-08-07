@@ -25,6 +25,7 @@ __all__ = [
     "playlist_slug_from_url",
     "predict_gamdl_name",
     "resolve_playlist_name",
+    "resolve_playlist_title",
     "sanitize_filename",
     "uniquify",
 ]
@@ -201,14 +202,44 @@ def escape_for_gamdl_template(name: str) -> str:
     return name.replace("{", "{{").replace("}", "}}")
 
 
-def predict_gamdl_name(name: str) -> str:
-    """Return the filename gamdl will actually produce for ``name``.
+def predict_gamdl_name(name: str, truncate: int | None = None, extension: str = ".m3u") -> str:
+    """Return the filename stem gamdl will actually produce for ``name``.
 
-    Mirrors ``AppleMusicBaseDownloader._sanitize_string``. Knowing this lets us
-    look for gamdl's output at an exact path instead of scanning the library for
-    recently-modified files and hoping we picked the right one.
+    Mirrors ``AppleMusicBaseDownloader._sanitize_string``, including its
+    ``--truncate`` behaviour: with a limit set, gamdl keeps only
+    ``truncate - len(extension)`` characters of the stem. Missing that meant we
+    looked for gamdl's output under the full-length name and concluded it had
+    produced nothing — so anyone who set ``truncate``, which is exactly the
+    person with long playlist names, got "gamdl produced no playlist file" for
+    every playlist over the limit.
     """
-    return GAMDL_ILLEGAL_RE.sub(GAMDL_ILLEGAL_REPLACEMENT, name).strip()
+    sanitized = GAMDL_ILLEGAL_RE.sub(GAMDL_ILLEGAL_REPLACEMENT, name)
+    if truncate is not None:
+        sanitized = sanitized[: truncate - len(extension)]
+    return sanitized.strip()
+
+
+def resolve_playlist_title(
+    url: str,
+    *,
+    overrides: dict[str, str] | None = None,
+    name_cache: dict[str, dict] | None = None,
+) -> str:
+    """The playlist's title as Apple stores it, before any filename sanitizing.
+
+    This is what belongs in the ``#PLAYLIST`` tag: the whole point of that field
+    is to show the real name in a player when the filename could not carry it.
+    """
+    override = (overrides or {}).get(url)
+    if isinstance(override, str) and override.strip():
+        return override.strip()
+
+    entry = (name_cache or {}).get(url)
+    cached = entry.get("name") if isinstance(entry, dict) else entry
+    if isinstance(cached, str) and cached.strip():
+        return cached.strip()
+
+    return playlist_slug_from_url(url)
 
 
 def playlist_short_id(url: str) -> str:

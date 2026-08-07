@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -200,6 +201,18 @@ def repair_playlist(
     )
 
 
+# M3U is line-oriented, so a newline inside a title or a tag value would end the
+# directive early and turn the rest of the value into a bogus entry. Tag data
+# comes from files on disk that this project did not write, so it is not
+# trustworthy input.
+_LINE_BREAK_RE = re.compile(r"[\r\n\u2028\u2029]+")
+
+
+def _one_line(value: str) -> str:
+    """Flatten anything that would break out of a single m3u directive."""
+    return _LINE_BREAK_RE.sub(" ", value).strip()
+
+
 def render_m3u8(entries: list[PlaylistEntry], title: str) -> str:
     """Render entries as extended M3U.
 
@@ -207,9 +220,12 @@ def render_m3u8(entries: list[PlaylistEntry], title: str) -> str:
     playlist's real name even when the filename had to be sanitised.
     """
     lines = ["#EXTM3U"]
-    if title:
-        lines.append(f"#PLAYLIST:{title}")
+    clean_title = _one_line(title)
+    if clean_title:
+        lines.append(f"#PLAYLIST:{clean_title}")
     for entry in entries:
-        lines.append(f"#EXTINF:{entry.duration},{entry.display}")
-        lines.append(entry.relative_path)
+        lines.append(f"#EXTINF:{entry.duration},{_one_line(entry.display)}")
+        # A path cannot contain a newline on any filesystem we support, so this
+        # is belt-and-braces rather than a real vector.
+        lines.append(_one_line(entry.relative_path))
     return "\n".join(lines) + "\n"

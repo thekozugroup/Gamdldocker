@@ -36,6 +36,7 @@ from .migrations import run_migrations
 from .naming import (
     predict_gamdl_name,
     resolve_playlist_name,
+    resolve_playlist_title,
     uniquify,
 )
 from .playlists import load_playlist_urls
@@ -285,22 +286,26 @@ class Daemon:
         # Names are resolved for every configured playlist even on a scoped run:
         # the collision suffixes depend on the whole set, and the orphan sweep
         # needs to know which filenames are legitimately claimed.
-        plan: list[tuple[str, str]] = []
+        # (url, filename stem, display title). The last two differ whenever the
+        # title contained something a filename cannot carry, which is exactly
+        # when the #PLAYLIST tag earns its keep.
+        plan: list[tuple[str, str, str]] = []
         for url in configured:
             resolved, source = resolve_playlist_name(
                 url, overrides=overrides, name_cache=name_cache, safe=settings.safe_filenames
             )
+            title = resolve_playlist_title(url, overrides=overrides, name_cache=name_cache)
             lowered = resolved.casefold()
             if lowered not in claimed:
                 on_disk.discard(lowered)
             unique = uniquify(resolved, url, claimed | on_disk)
             claimed.add(unique.casefold())
-            plan.append((url, unique))
+            plan.append((url, unique, title))
             log.debug("resolved %s -> %r (via %s)", url, unique, source)
 
-        self._claimed_names = {name.casefold() for _, name in plan}
+        self._claimed_names = {name.casefold() for _, name, _ in plan}
 
-        work = [(url, name) for url, name in plan if url in target_set]
+        work = [item for item in plan if item[0] in target_set]
         if len(work) != len(plan):
             log.info("syncing %d of %d playlist(s) this cycle", len(work), len(plan))
 
@@ -309,27 +314,29 @@ class Daemon:
             with ThreadPoolExecutor(max_workers=settings.concurrency) as pool:
                 list(pool.map(lambda item: self._sync_guarded(settings, *item), work))
         else:
-            for url, name in work:
+            for url, name, _title in work:
                 # Between playlists is the only safe point to notice a cancel,
                 # and it is the only place the control directory gets read while
                 # a cycle is running.
                 self._handle_commands()
                 if self.stop_event.is_set() or self.cancel_event.is_set():
-                    log.info("cycle cancelled after %d playlist(s)", work.index((url, name)))
+                    log.info(
+                        "cycle cancelled after %d playlist(s)", work.index((url, name, _title))
+                    )
                     break
-                self._sync_guarded(settings, url, name)
+                self._sync_guarded(settings, url, name, _title)
 
-        self._sweep_orphans(settings, [name for _, name in plan])
+        self._sweep_orphans(settings, [name for _, name, _ in plan])
         log.info("cycle %d finished in %.1fs", self.cycle, time.monotonic() - started)
 
-    def _sync_guarded(self, settings: Settings, url: str, name: str) -> None:
+    def _sync_guarded(self, settings: Settings, url: str, name: str, title: str = "") -> None:
         if self.stop_event.is_set() or self.cancel_event.is_set():
             return
         started = time.monotonic()
         self.status.mark_running(url, name=name)
         self._beat("syncing", detail=name)
         try:
-            outcome = self.sync_one(settings, url, name)
+            outcome = self.sync_one(settings, url, name, title or name)
         except Exception as exc:
             log.exception("unhandled error syncing %s", url)
             outcome = SyncOutcome(status="failed", name=name, error=f"{type(exc).__name__}: {exc}")
@@ -352,7 +359,7 @@ class Daemon:
     # One playlist
     # ------------------------------------------------------------------ #
 
-    def sync_one(self, settings: Settings, url: str, name: str) -> SyncOutcome:
+    def sync_one(self, settings: Settings, url: str, name: str, title: str = "") -> SyncOutcome:
         output_root = Path(settings.output_location)
         m3u_dir = Path(settings.playlist_m3u_dir)
 
@@ -373,7 +380,7 @@ class Daemon:
 
         # gamdl replaces its own illegal characters, so the file it writes may
         # not carry the name we asked for.
-        gamdl_stem = predict_gamdl_name(name)
+        gamdl_stem = predict_gamdl_name(name, settings.truncate)
         staged = staging_dir / f"{gamdl_stem}.m3u"
         target = m3u_dir / f"{name}.m3u8"
 
@@ -425,7 +432,7 @@ class Daemon:
             produced,
             m3u_dir=m3u_dir,
             output_root=output_root,
-            title=name,
+            title=title or name,
             prune_missing=settings.prune_playlist_entries,
             source_dir=produced.parent,
         )

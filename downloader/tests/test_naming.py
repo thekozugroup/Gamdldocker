@@ -16,6 +16,7 @@ from gamdl_sync.naming import (
     playlist_slug_from_url,
     predict_gamdl_name,
     resolve_playlist_name,
+    resolve_playlist_title,
     sanitize_filename,
     uniquify,
 )
@@ -344,3 +345,52 @@ def test_short_ids_differ_between_catalog_playlists():
     first = playlist_short_id("https://music.apple.com/us/playlist/a/pl.1111aaaa2222")
     second = playlist_short_id("https://music.apple.com/us/playlist/b/pl.3333bbbb4444")
     assert first != second
+
+
+# --------------------------------------------------------------------------- #
+# gamdl's --truncate changes where it writes
+# --------------------------------------------------------------------------- #
+
+
+def test_predict_gamdl_name_models_truncate():
+    # gamdl keeps truncate - len(extension) characters of the stem. Predicting
+    # the full-length name meant we looked in the wrong place and reported
+    # "gamdl produced no playlist file" for every name over the limit.
+    name = "A" * 46
+    assert predict_gamdl_name(name, truncate=20) == "A" * 16
+
+
+def test_predict_gamdl_name_without_truncate_is_unchanged():
+    name = "A" * 46
+    assert predict_gamdl_name(name) == name
+
+
+def test_predict_gamdl_name_truncate_still_replaces_illegal_chars():
+    assert predict_gamdl_name("ab/cd:ef", truncate=10) == "ab_cd_"
+
+
+# --------------------------------------------------------------------------- #
+# The #PLAYLIST tag carries the real title, not the filename
+# --------------------------------------------------------------------------- #
+
+
+def test_title_prefers_the_override_verbatim():
+    url = "https://music.apple.com/us/playlist/foo/pl.u-AAAAAA111111"
+    assert resolve_playlist_title(url, overrides={url: "Rock; Roll"}) == "Rock; Roll"
+
+
+def test_title_is_not_sanitized():
+    # The filename must lose the semicolon; the title must not.
+    url = "https://music.apple.com/us/playlist/foo/pl.u-AAAAAA111111"
+    cache = {url: {"name": 'Best of / 2024: "Live"'}}
+    filename, _ = resolve_playlist_name(url, name_cache=cache)
+    title = resolve_playlist_title(url, name_cache=cache)
+    assert title == 'Best of / 2024: "Live"'
+    assert filename == "Best of ／ 2024： ＂Live＂"
+
+
+def test_title_falls_back_to_the_slug():
+    assert (
+        resolve_playlist_title("https://music.apple.com/us/playlist/my-mix/pl.u-AAAAAA111111")
+        == "my mix"
+    )

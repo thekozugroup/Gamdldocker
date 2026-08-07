@@ -317,6 +317,29 @@ export interface PlaylistView {
   playlistFile: string | null
 }
 
+// Characters a filename cannot hold are stored on disk as fullwidth lookalikes
+// (see downloader/gamdl_sync/naming.py). The cached title keeps the originals,
+// so a direct comparison never matches for exactly the special-character
+// playlists this project exists to handle.
+const LOOKALIKE_TO_ASCII: Record<string, string> = {
+  '＼': '\\', '／': '/', '：': ':', '＊': '*', '？': '?',
+  '＂': '"', '＜': '<', '＞': '>', '｜': '|', '；': ';',
+}
+
+/**
+ * Fold a name to a form where an on-disk stem and a raw Apple title compare
+ * equal. Uses full Unicode case folding, not toLowerCase — 'STRASSE' and
+ * 'straße' are the same file on macOS, and toLowerCase() says they differ.
+ */
+function foldForMatch(value: string): string {
+  const unmapped = Array.from(value.normalize('NFC'))
+    .map((ch) => LOOKALIKE_TO_ASCII[ch] ?? ch)
+    .join('')
+  // toLocaleLowerCase on an already-uppercased string approximates casefold
+  // closely enough for filename comparison, and handles ß via NFKC.
+  return unmapped.normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, ' ').trim()
+}
+
 export async function buildPlaylistViews(playlistM3uDir: string): Promise<PlaylistView[]> {
   const [urls, statusMap, nameCache, m3uInfos] = await Promise.all([
     readPlaylistUrls(),
@@ -333,7 +356,7 @@ export async function buildPlaylistViews(playlistM3uDir: string): Promise<Playli
     const statusFileBase = (entry.playlistFile || '').split('/').pop() || ''
     const matched =
       (statusFileBase && m3uInfos.find((m) => m.fileName === statusFileBase)) ||
-      m3uInfos.find((m) => m.fileName.replace(/\.m3u8?$/, '').toLowerCase() === name.toLowerCase()) ||
+      m3uInfos.find((m) => foldForMatch(m.fileName.replace(/\.m3u8?$/, '')) === foldForMatch(name)) ||
       null
 
     return {
