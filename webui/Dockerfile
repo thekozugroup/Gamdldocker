@@ -7,19 +7,19 @@
 # socket — an enormous amount of privilege for two features that are now a file
 # write and a file read.
 
-FROM node:20-alpine AS deps
+FROM node:25-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
-FROM node:20-alpine AS builder
+FROM node:25-alpine AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
-FROM node:20-alpine AS runner
+FROM node:25-alpine AS runner
 
 LABEL org.opencontainers.image.title="gamdl-webui" \
       org.opencontainers.image.description="Web interface for the gamdl playlist downloader" \
