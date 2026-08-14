@@ -10,7 +10,7 @@
 # --------------------------------------------------------------------------- #
 # Stage 1 — build the virtualenv
 # --------------------------------------------------------------------------- #
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 # Empty means "whatever is current at build time". Pin it (e.g. 3.8.5) for a
 # reproducible image; the runtime auto-update can still move forward from there.
@@ -100,7 +100,7 @@ RUN gamdl --version > /opt/gamdl-baseline 2>&1 || echo "unknown" > /opt/gamdl-ba
 # --------------------------------------------------------------------------- #
 # Stage 2 — runtime
 # --------------------------------------------------------------------------- #
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 LABEL org.opencontainers.image.title="gamdl-downloader" \
       org.opencontainers.image.description="Scheduled Apple Music playlist sync built on gamdl" \
